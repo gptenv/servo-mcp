@@ -58,21 +58,25 @@ builds Servo and asks Wrangler to calculate the bundle without deploying.
 The Servo binary is close to Cloudflare's 64 MiB Worker bundle ceiling, so the
 combined Worker bundle must be measured before any deployment.
 
-## Deployment checklist
+## Test deployment
 
-Deployment has not been run from this checkout. Before exposing the service:
+Deployed on 2026-09-25 to the authenticated Cloudflare account:
 
-1. Decide whether the service will be private or public. Add user OAuth and
-   consent before offering it as a private, user-scoped service.
-2. Run the production bundle dry-run and verify it fits the plan's bundle limit.
-3. Measure CPU and total isolate memory on the intended Workers plan.
-4. Review Cloudflare and ChatGPT app submission requirements before publication.
+- MCP endpoint: <https://servo-mcp.defcronyke.workers.dev/mcp>
+- Health: <https://servo-mcp.defcronyke.workers.dev/health>
+- Worker version: `51012c07-bb9d-4dd2-b2a1-82b40328fef7`
 
-The worker currently has no authentication handler. Treat it as a
-developer-mode integration until access control is chosen and, for private or
-user-scoped use, OAuth and consent are implemented. The MCP handler validates
-localhost and `workers.dev` Host/Origin defaults; custom domains should also be
-protected by Cloudflare routing and deployment policy.
+The MCP endpoint, `servo_run` tool, and `ui://servo/browser.html` resource were
+verified against the live Worker. The endpoint currently has no authentication
+and is public for testing. Before broader publication, decide the access
+policy; add OAuth and consent before private or user-scoped use. Measure CPU
+and total isolate memory on the intended Workers plan and review Cloudflare and
+ChatGPT submission requirements before publication. The deployed bundle was
+62,172 KiB in Wrangler's dry run, below the 64 MiB Worker limit.
+
+The MCP handler validates localhost and `workers.dev` Host/Origin defaults;
+custom domains should also be protected by Cloudflare routing and deployment
+policy.
 
 ## License
 
