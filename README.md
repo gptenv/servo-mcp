@@ -93,21 +93,21 @@ combined Worker bundle must be measured before any deployment.
 
 ## Test deployment
 
-Last deployed on 2026-09-25, before the Durable Object session refactor below, to
-the authenticated Cloudflare account. The repository now contains newer
-session-based tools; they are not live until deployed.
+Deployed on 2026-09-25 to the authenticated Cloudflare account. The live Worker
+uses Durable Object-backed browser sessions and the focused multi-session MCP
+tools documented above.
 
 - MCP endpoint: <https://servo-mcp.defcronyke.workers.dev/mcp>
 - Health: <https://servo-mcp.defcronyke.workers.dev/health>
-- Last deployed Worker version: `51012c07-bb9d-4dd2-b2a1-82b40328fef7`
+- Deployed Worker version: `acb763cf-1f76-4b84-be7f-378d6e53a872`
 
-The MCP endpoint, `servo_run` tool, and `ui://servo/browser.html` resource were
-verified against the live Worker. The endpoint currently has no authentication
-and is public for testing. Before broader publication, decide the access
+The `/health` endpoint and MCP `tools/list` response were verified against the
+live Worker. The endpoint currently has no authentication and is public for
+testing. Before broader publication, decide the access
 policy; add OAuth and consent before private or user-scoped use. Measure CPU
 and total isolate memory on the intended Workers plan and review Cloudflare and
 ChatGPT submission requirements before publication. The deployed bundle was
-62,172 KiB in Wrangler's dry run, below the 64 MiB Worker limit.
+62,614 KiB in Wrangler's dry run, below the 64 MiB Worker limit.
 
 The MCP handler validates localhost and `workers.dev` Host/Origin defaults;
 custom domains should also be protected by Cloudflare routing and deployment
