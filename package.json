@@ -1,0 +1,27 @@
+{
+  "name": "servo-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "A ChatGPT MCP App that runs Servo WASM in a Cloudflare Worker.",
+  "scripts": {
+    "engine:build": "cd servo-wasm && ./mach build --target wasm32-unknown-unknown --no-default-features --jobs 2 --profile production-stripped --manifest-path ports/servo-js-wasm/Cargo.toml",
+    "dev": "wrangler dev --ip 127.0.0.1 --port 8788",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "deploy": "npm run engine:build && wrangler deploy",
+    "deploy:dry-run": "npm run engine:build && wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "^0.24.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260925.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.139.0"
+  }
+}

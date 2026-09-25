@@ -1,0 +1,3 @@
+[submodule "servo-wasm"]
+	path = servo-wasm
+	url = https://github.com/gptenv/servo-wasm.git
