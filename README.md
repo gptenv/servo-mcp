@@ -99,7 +99,7 @@ tools documented above.
 
 - MCP endpoint: <https://servo-mcp.defcronyke.workers.dev/mcp>
 - Health: <https://servo-mcp.defcronyke.workers.dev/health>
-- Deployed Worker version: `acb763cf-1f76-4b84-be7f-378d6e53a872`
+- Deployed Worker version: `dbb00dbf-d7c8-4b9c-91eb-a433948cf480`
 
 The `/health` endpoint and MCP `tools/list` response were verified against the
 live Worker. The endpoint currently has no authentication and is public for
@@ -107,7 +107,7 @@ testing. Before broader publication, decide the access
 policy; add OAuth and consent before private or user-scoped use. Measure CPU
 and total isolate memory on the intended Workers plan and review Cloudflare and
 ChatGPT submission requirements before publication. The deployed bundle was
-62,614 KiB in Wrangler's dry run, below the 64 MiB Worker limit.
+62,633 KiB in Wrangler's dry run, below the 64 MiB Worker limit.
 
 The MCP handler validates localhost and `workers.dev` Host/Origin defaults;
 custom domains should also be protected by Cloudflare routing and deployment
