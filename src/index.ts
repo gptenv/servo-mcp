@@ -1,55 +1,53 @@
 import { createMcpHandler } from 'agents/mcp/server';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import servoWasm from '../servo-wasm/target/wasm32-unknown-unknown/production-stripped/servo_js_wasm.wasm';
 import widgetHtml from './browser-widget.html';
-import { createServoWorkerRuntime } from '../servo-wasm/ports/servo-js-wasm/worker-adapter.mjs';
-import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
+import { ServoBrowserSession, type BrowserSessionOptions } from './browser-session';
+import { assertPublicHttpUrl } from './security';
 
 const WIDGET_URI = 'ui://servo/browser.html';
-const MAX_HTML_BYTES = 2 * 1024 * 1024;
-const MAX_SCRIPT_BYTES = 64 * 1024;
-const MAX_ACTIONS = 20;
 const MAX_TOOL_DURATION_MS = 15_000;
-const pageAction = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('evaluate'), script: z.string().max(MAX_SCRIPT_BYTES) }),
-  z.object({ type: z.literal('click'), x: z.number().finite(), y: z.number().finite(), button: z.number().int().min(0).max(4).optional() }),
-  z.object({ type: z.literal('type'), text: z.string().max(4096) }),
-  z.object({ type: z.literal('key'), key: z.string().min(1).max(64) }),
-  z.object({ type: z.literal('scroll'), deltaX: z.number().finite(), deltaY: z.number().finite(), x: z.number().finite().optional(), y: z.number().finite().optional() }),
-  z.object({ type: z.literal('back') }),
-  z.object({ type: z.literal('forward') }),
-  z.object({ type: z.literal('reload') }),
-  z.object({ type: z.literal('wait'), maxDurationMs: z.number().int().min(0).max(MAX_TOOL_DURATION_MS).optional() }),
-  z.object({ type: z.literal('screenshot'), fullPage: z.boolean().optional() }),
-  z.object({ type: z.literal('snapshot') }),
-]);
+const MAX_SCRIPT_BYTES = 64 * 1024;
+const MAX_FONT_BASE64_BYTES = 44_739_244;
 
-const inputSchema = z.object({
+const sessionCreateOptionsSchema = z.object({
   url: z.string().url().max(2048).optional(),
-  html: z.string().max(MAX_HTML_BYTES).optional(),
+  html: z.string().max(1 * 1024 * 1024).optional(),
   width: z.number().int().min(320).max(1920).default(1280),
   height: z.number().int().min(240).max(1600).default(720),
-  actions: z.array(pageAction).max(MAX_ACTIONS).default([]),
-  fontBase64: z.string().max(44_739_244).optional(),
+  fontBase64: z.string().max(MAX_FONT_BASE64_BYTES).optional(),
   maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
 });
-
-type PageAction = z.infer<typeof pageAction>;
-
-async function publicFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const url = assertPublicHttpUrl(input instanceof Request ? input.url : String(input));
-  return fetch(url, { ...init, redirect: 'manual' });
-}
-
-function publicWebSocket(url: string, protocols?: string | string[]): WebSocket {
-  const target = assertPublicWebSocketUrl(url);
-  return new WebSocket(target, protocols);
-}
-
-function pageSummaryExpression(): string {
-  return `JSON.stringify({url: location.href, title: document.title, text: (document.body?.innerText || '').slice(0, 20000)})`;
-}
+const sessionCreateSchema = z.object({ sessions: z.array(sessionCreateOptionsSchema).min(1).max(20) });
+const sessionIdsSchema = z.object({ sessionIds: z.array(z.string().uuid()).min(1).max(20) }).refine(
+  ({ sessionIds }) => new Set(sessionIds).size === sessionIds.length,
+  { message: 'Each sessionId may appear only once.' },
+);
+const multiSession = <T extends z.ZodRawShape>(shape: T) => z.object({
+  sessions: z.array(z.object({ sessionId: z.string().uuid() }).extend(shape)).min(1).max(20),
+});
+const navigateSchema = multiSession({ url: z.string().url().max(2048), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+const evaluateSchema = multiSession({ script: z.string().max(MAX_SCRIPT_BYTES), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+const clickSchema = multiSession({
+  x: z.number().finite(), y: z.number().finite(), button: z.number().int().min(0).max(4).default(0),
+  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
+});
+const typeTextSchema = multiSession({ text: z.string().max(4096), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+const keySchema = multiSession({ key: z.string().min(1).max(64), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+const scrollSchema = multiSession({
+  deltaX: z.number().finite(), deltaY: z.number().finite(), x: z.number().finite().optional(), y: z.number().finite().optional(),
+  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
+});
+const historySchema = multiSession({ direction: z.enum(['back', 'forward']), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+const waitSchema = multiSession({
+  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(1_000),
+});
+const screenshotSchema = multiSession({
+  fullPage: z.boolean().default(false), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(5_000),
+});
+const registerFontSchema = multiSession({ fontBase64: z.string().min(1).max(MAX_FONT_BASE64_BYTES) });
+const capabilitiesSchema = multiSession({});
+const inspectSchema = multiSession({});
 
 function toBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -59,137 +57,49 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-async function pump(runtime: Awaited<ReturnType<typeof createServoWorkerRuntime>>, maxDurationMs: number) {
-  const status = await runtime.pumpUntilSettled({
-    maxDurationMs,
-    maxTurns: 2_000,
-    networkIdleMs: 250,
-  });
-  if (!status.settled) throw new Error(`Servo did not settle within ${maxDurationMs} ms.`);
-  return status;
-}
-
-async function evaluate(runtime: Awaited<ReturnType<typeof createServoWorkerRuntime>>, script: string,
-  maxDurationMs: number) {
-  if (!runtime.evaluatePage(script)) throw new Error('Servo rejected this page evaluation.');
-  await pump(runtime, maxDurationMs);
-  return runtime.pageResult();
-}
-
-function parseJsonEvaluationResult(result: unknown): unknown {
-  if (typeof result !== 'object' || result === null || !('Ok' in result)) return result;
-  const value = (result as { Ok?: { String?: unknown } }).Ok?.String;
-  if (typeof value !== 'string') return result;
-  try { return JSON.parse(value); } catch { return result; }
-}
-
-async function runPage(input: z.infer<typeof inputSchema>) {
-  if (!input.url && input.html === undefined) throw new TypeError('Provide either a page URL or HTML.');
-  if (input.url) assertPublicHttpUrl(input.url);
-  if (input.html !== undefined && new TextEncoder().encode(input.html).byteLength > MAX_HTML_BYTES) {
-    throw new RangeError(`Inline HTML exceeds ${MAX_HTML_BYTES} UTF-8 bytes.`);
-  }
-  const pageUrl = input.url ?? 'https://inline.servo.invalid/';
-  const runtime = await createServoWorkerRuntime(servoWasm, {
-    width: input.width,
-    height: input.height,
-    url: 'about:blank',
-    fetchImpl: publicFetch,
-    webSocketFactory: publicWebSocket,
-    maxResponseBytes: 8 * 1024 * 1024,
-    maxSubrequests: 50,
-    log: (message: string) => console.error(`[servo] ${message.slice(0, 2048)}`),
-  });
-  const results: Array<{ action: string; result?: unknown; fullPage?: boolean }> = [];
-  let screenshotBase64: string | undefined;
-  try {
-    if (input.html !== undefined) runtime.loadHtml(input.html, { url: pageUrl });
-    else runtime.loadPage(pageUrl);
-    await pump(runtime, input.maxDurationMs);
-
-    if (input.fontBase64) {
-      const binary = atob(input.fontBase64);
-      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      results.push({ action: 'registerFont', result: runtime.registerFont(bytes) });
+function mcpResult(value: object) {
+  const data: Record<string, unknown> = { ...value };
+  const png = data.png;
+  const images = data.images;
+  delete data.png;
+  delete data.images;
+  const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
+    { type: 'text', text: JSON.stringify(data) },
+  ];
+  if (png instanceof Uint8Array) content.push({ type: 'image', data: toBase64(png), mimeType: 'image/png' });
+  if (Array.isArray(images)) {
+    for (const image of images) {
+      if (image instanceof Uint8Array) content.push({ type: 'image', data: toBase64(image), mimeType: 'image/png' });
     }
-
-    for (const action of input.actions as PageAction[]) {
-      switch (action.type) {
-        case 'evaluate':
-          results.push({ action: action.type, result: await evaluate(runtime, action.script, input.maxDurationMs) });
-          break;
-        case 'click':
-          runtime.click(action.x, action.y, action.button ?? 0);
-          await pump(runtime, input.maxDurationMs);
-          results.push({ action: action.type });
-          break;
-        case 'type':
-          runtime.typeText(action.text);
-          await pump(runtime, input.maxDurationMs);
-          results.push({ action: action.type });
-          break;
-        case 'key':
-          runtime.pressKey(action.key);
-          await pump(runtime, input.maxDurationMs);
-          results.push({ action: action.type });
-          break;
-        case 'scroll':
-          runtime.scrollBy(action.deltaX, action.deltaY, { x: action.x, y: action.y });
-          await pump(runtime, input.maxDurationMs);
-          results.push({ action: action.type });
-          break;
-        case 'back':
-          results.push({ action: action.type, result: runtime.goBack() });
-          await pump(runtime, input.maxDurationMs);
-          break;
-        case 'forward':
-          results.push({ action: action.type, result: runtime.goForward() });
-          await pump(runtime, input.maxDurationMs);
-          break;
-        case 'reload':
-          results.push({ action: action.type, result: runtime.reload() });
-          await pump(runtime, input.maxDurationMs);
-          break;
-        case 'wait':
-          await pump(runtime, action.maxDurationMs ?? input.maxDurationMs);
-          results.push({ action: action.type });
-          break;
-        case 'snapshot':
-          results.push({ action: action.type,
-            result: parseJsonEvaluationResult(
-              await evaluate(runtime, pageSummaryExpression(), input.maxDurationMs),
-            ) });
-          break;
-        case 'screenshot': {
-          const png = await runtime.screenshot({ fullPage: action.fullPage ?? false,
-            maxDurationMs: input.maxDurationMs });
-          screenshotBase64 = toBase64(png);
-          results.push({ action: action.type, fullPage: action.fullPage ?? false });
-          break;
-        }
-      }
-    }
-    const page = await evaluate(runtime, pageSummaryExpression(), input.maxDurationMs);
-    return {
-      url: pageUrl,
-      page: parseJsonEvaluationResult(page),
-      results,
-      capabilities: runtime.capabilities(),
-      screenshot: screenshotBase64,
-    };
-  } finally {
-    runtime.reset();
   }
+  return { structuredContent: data, content };
 }
 
-function createServer() {
-  const server = new McpServer({ name: 'servo-mcp', version: '0.1.0' }, {
-    instructions: 'Use servo_run for isolated headless page loads, DOM inspection, script evaluation, browser input, and screenshots. Every call creates a fresh browser; provide the URL or HTML again on follow-up calls. The engine does not preserve cookies or sessions, does not await returned evaluation promises, and enforces public HTTP(S) networking only.',
+function errorResult(error: unknown) {
+  const message = error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.';
+  return { isError: true, content: [{ type: 'text' as const, text: message }] };
+}
+
+function createServer(env: Env) {
+  const server = new McpServer({ name: 'servo-mcp', version: '0.3.0' }, {
+    instructions: [
+      'Each Servo session is one independent browser tab. Create one session per tab, keep a mapping from a short description to its returned sessionId, and pass that exact ID in the sessions list for later operations. Each focused browser tool accepts multiple per-session entries and runs them concurrently. Close only the sessions you are done with.',
+      'A live WASM runtime is cached for 90 seconds after activity; afterward, the selected session is reopened from a persisted snapshot. No prior tool actions are replayed.',
+      'Each tool keeps one focused purpose. For example, servo_navigate accepts multiple {sessionId,url,maxDurationMs} entries and servo_click accepts multiple entries with independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident.',
+      'Snapshots preserve the current URL, viewport, scroll position, common form values, web storage, script-visible cookies, and registered fonts. Restoring reloads the page, so page scripts run again; JavaScript heap state, HttpOnly cookies, and arbitrary in-memory DOM/application state are not restored. Sessions expire after 30 days without use or when closed with servo_session_close.',
+      'A sessionId is a bearer capability because this public MCP server currently has no authentication. Do not share it. Only navigate to public HTTP(S) pages; private/local network targets are blocked.',
+      'servo_click, servo_type_text, servo_press_key, and servo_evaluate may cause page-side effects. Use them only for actions the user requested, and do not repeat a call merely because its response was unclear.',
+      'Servo capabilities are partial. Use servo_get_capabilities and inspect returned errors before concluding a page is broken.',
+    ].join(' '),
   });
+  const session = (sessionId: string) => env.BROWSER_SESSIONS.getByName(sessionId);
+  const safely = async (operation: () => Promise<object>) => {
+    try { return mcpResult(await operation()); } catch (error) { return errorResult(error); }
+  };
 
   server.registerResource('servo-browser-ui', WIDGET_URI, {
     title: 'Servo browser controls',
-    description: 'Load a public web page with Servo WASM and inspect a rendered screenshot.',
+    description: 'Create a Servo browser session, inspect a public page, and view its rendered screenshot.',
     mimeType: 'text/html;profile=mcp-app',
     _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
   }, async (uri) => ({ contents: [{ uri: uri.href,
@@ -197,50 +107,161 @@ function createServer() {
     _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
   }] }));
 
-  server.registerTool('servo_run', {
-    title: 'Run Servo browser',
-    description: 'Create a fresh Servo WASM browser, load a public HTTP(S) page or supplied HTML, run up to 20 browser actions, inspect the DOM, and optionally return a PNG screenshot. Page scripts run in the page realm. Evaluation is synchronous and returns one serialized value; it does not await JavaScript promises. Network access to private/local addresses is blocked.',
-    inputSchema,
-    outputSchema: z.object({
-      url: z.string(),
-      page: z.unknown(),
-      results: z.array(z.object({ action: z.string(), result: z.unknown().optional(), fullPage: z.boolean().optional() })),
-      capabilities: z.unknown(),
-      screenshot: z.string().optional(),
-    }),
-    _meta: {
-      ui: { resourceUri: WIDGET_URI },
-      'openai/toolInvocation/invoking': 'Running Servo…',
-      'openai/toolInvocation/invoked': 'Page rendered.',
-    },
-  }, async (args) => {
-    try {
-      const result = await runPage(args as z.infer<typeof inputSchema>);
-      const { screenshot, ...structuredContent } = result;
-      return {
-        structuredContent,
-        content: [
-          { type: 'text' as const, text: JSON.stringify(structuredContent) },
-          ...(screenshot ? [{ type: 'image' as const, data: screenshot, mimeType: 'image/png' }] : []),
-        ],
-      };
-    } catch (error) {
-      return { isError: true, content: [{ type: 'text' as const,
-        text: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' }] };
+  const runSessions = async <T extends { sessionId: string }, R>(
+    groups: T[],
+    operation: (browser: ReturnType<typeof session>, group: T) => Promise<R>,
+  ) => {
+    if (new Set(groups.map(({ sessionId }) => sessionId)).size !== groups.length) {
+      throw new TypeError('Each sessionId may appear only once in a tool call.');
     }
-  });
+    return { results: await Promise.all(groups.map(async (group) => {
+    try {
+      return { sessionId: group.sessionId, ok: true, result: await operation(session(group.sessionId), group) };
+    } catch (error) {
+      return { sessionId: group.sessionId, ok: false, error: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' };
+    }
+    })) };
+  };
+
+  server.registerTool('servo_session_create', {
+    title: 'Servo session create',
+    description: 'Create one or more independent Servo browser tabs in parallel. Each sessions entry may include a public URL or inline HTML plus its own viewport, font, and load-budget settings. Returns a separate server-generated sessionId for each tab; pass those IDs in later tools to choose the tabs.',
+    inputSchema: sessionCreateSchema,
+  }, async ({ sessions }) => safely(async () => ({ results: await Promise.all(sessions.map(async (options) => {
+    const sessionId = crypto.randomUUID();
+    try {
+      if (options.url && options.html !== undefined) throw new TypeError('Provide a URL or inline HTML, not both.');
+      if (options.url) assertPublicHttpUrl(options.url);
+      const result = await session(sessionId).initialize({ sessionId, ...options } as BrowserSessionOptions);
+      return { sessionId, ok: true, result };
+    } catch (error) {
+      return { sessionId, ok: false, error: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' };
+    }
+  })) })));
+
+  server.registerTool('servo_session_status', {
+    title: 'Servo session status',
+    description: 'Check multiple browser sessions in parallel. runtimeAvailable=false with resumable=true is normal after the live runtime is discarded; browser tools will restore the saved tab automatically.',
+    inputSchema: sessionIdsSchema,
+  }, async ({ sessionIds }) => safely(async () => ({ results: await Promise.all(sessionIds.map(async (sessionId) => {
+    try { return { sessionId, ok: true, result: await session(sessionId).getStatus() }; }
+    catch (error) { return { sessionId, ok: false, error: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' }; }
+  })) })));
+
+  server.registerTool('servo_session_close', {
+    title: 'Servo session close',
+    description: 'Close multiple selected tabs in parallel and delete their saved snapshots and assets. Only include sessions you are finished with; closed sessions cannot be resumed.',
+    inputSchema: sessionIdsSchema,
+  }, async ({ sessionIds }) => safely(async () => ({ results: await Promise.all(sessionIds.map(async (sessionId) => {
+    try { return { sessionId, ok: true, result: await session(sessionId).close() }; }
+    catch (error) { return { sessionId, ok: false, error: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' }; }
+  })) })));
+
+  server.registerTool('servo_navigate', {
+    title: 'Servo navigate',
+    description: 'Navigate multiple selected tabs in parallel. Each sessions entry carries its own sessionId, URL, and optional load budget. Private/local network addresses are blocked.',
+    inputSchema: navigateSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => {
+    assertPublicHttpUrl(group.url);
+    return browser.navigate(group.url, group.maxDurationMs);
+  })));
+
+  server.registerTool('servo_inspect', {
+    title: 'Servo inspect',
+    description: 'Read the URL, title, and visible body text for multiple selected tabs in parallel.',
+    inputSchema: inspectSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser) => browser.inspect())));
+
+  server.registerTool('servo_evaluate', {
+    title: 'Servo evaluate',
+    description: 'Evaluate a synchronous JavaScript script in each selected page in parallel. Every entry carries its own script and budget. Results are serialized; returned promises are not awaited. Scripts can modify pages or cause external effects.',
+    inputSchema: evaluateSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.evaluate(group.script, group.maxDurationMs))));
+
+  server.registerTool('servo_click', {
+    title: 'Servo click',
+    description: 'Click different device-pixel coordinates in multiple selected tabs in parallel. Ground each entry’s coordinates in that tab’s screenshot or measured DOM bounds. Clicks can submit forms or trigger page actions.',
+    inputSchema: clickSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.click(group.x, group.y, group.button, group.maxDurationMs))));
+
+  server.registerTool('servo_type_text', {
+    title: 'Servo type text',
+    description: 'Type per-session text into each selected tab’s currently focused control in parallel. Focus the intended fields first. Typing can trigger live search, autosave, or other page effects.',
+    inputSchema: typeTextSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.typeText(group.text, group.maxDurationMs))));
+
+  server.registerTool('servo_press_key', {
+    title: 'Servo press key',
+    description: 'Press a key in multiple selected tabs in parallel. Each entry has its own key. Focus intended controls first; Enter may submit forms.',
+    inputSchema: keySchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.pressKey(group.key, group.maxDurationMs))));
+
+  server.registerTool('servo_scroll', {
+    title: 'Servo scroll',
+    description: 'Scroll multiple selected tabs in parallel. Each entry has its own pixel deltas and optional viewport point.',
+    inputSchema: scrollSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.scroll(group.deltaX, group.deltaY, group.x, group.y, group.maxDurationMs))));
+
+  server.registerTool('servo_history', {
+    title: 'Servo history',
+    description: 'Move multiple selected tabs backward or forward in their live Servo history. Each entry chooses its own direction. History is not part of the restore snapshot and resets after the runtime is discarded.',
+    inputSchema: historySchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.history(group.direction, group.maxDurationMs))));
+
+  server.registerTool('servo_reload', {
+    title: 'Servo reload',
+    description: 'Reload multiple selected tabs in parallel and wait for each page to settle.',
+    inputSchema: multiSession({ maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) }),
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.reload(group.maxDurationMs))));
+
+  server.registerTool('servo_wait', {
+    title: 'Servo wait',
+    description: 'Let multiple selected pages process browser timers and pending network work in parallel, using each entry’s own time budget.',
+    inputSchema: waitSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.wait(group.maxDurationMs))));
+
+  server.registerTool('servo_screenshot', {
+    title: 'Servo screenshot',
+    description: 'Capture viewport or full-page screenshots from multiple selected tabs in parallel. Results map imageIndex values to session IDs.',
+    inputSchema: screenshotSchema,
+  }, async ({ sessions }) => safely(async () => {
+    if (new Set(sessions.map(({ sessionId }) => sessionId)).size !== sessions.length) {
+      throw new TypeError('Each sessionId may appear only once in a tool call.');
+    }
+    const images: Uint8Array[] = [];
+    const results = await Promise.all(sessions.map(async (group) => {
+      try {
+        const result = await session(group.sessionId).screenshot(group.fullPage, group.maxDurationMs);
+        const imageIndex = images.push(result.png) - 1;
+        return { sessionId: group.sessionId, ok: true, result: { page: result.page, imageIndex } };
+      } catch (error) {
+        return { sessionId: group.sessionId, ok: false, error: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' };
+      }
+    }));
+    return { results, images };
+  }));
+
+  server.registerTool('servo_register_font', {
+    title: 'Servo register font',
+    description: 'Register per-session base64-encoded TTF/OTF/TTC/OTC fonts in multiple tabs in parallel. Register before navigating to pages that need them.',
+    inputSchema: registerFontSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.registerFont(group.fontBase64))));
+
+  server.registerTool('servo_get_capabilities', {
+    title: 'Servo get capabilities',
+    description: 'Return supported, partial, unsupported, and unverified Servo features for multiple selected sessions in parallel.',
+    inputSchema: capabilitiesSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser) => browser.capabilities())));
 
   return server;
 }
 
-const mcpHandler = createMcpHandler(createServer, {
-  route: '/mcp',
-});
+export { ServoBrowserSession };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ ok: true, name: 'servo-mcp' });
-    return mcpHandler(request, env, ctx);
+    return createMcpHandler(() => createServer(env), { route: '/mcp' })(request, env, ctx);
   },
 };
