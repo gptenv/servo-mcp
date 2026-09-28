@@ -74,7 +74,13 @@ export class FakeServoRuntime {
   }
 
   private currentSummary(script: string): FakeSummary {
-    let summary = typeof this.options.summary === 'function' ? this.options.summary() : this.options.summary;
+    const configuredSummary = this.options.summary;
+    let summary = configuredSummary;
+    if (typeof configuredSummary === 'function') {
+      summary = configuredSummary.length === 0
+        ? (configuredSummary as () => FakeSummary | FakeSummaryFn)()
+        : (configuredSummary as FakeSummaryFn)(script);
+    }
     if (typeof summary === 'function') summary = (summary as FakeSummaryFn)(script);
     return summary ?? {};
   }

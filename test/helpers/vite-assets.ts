@@ -8,6 +8,8 @@
  */
 
 import type { Plugin } from 'vite';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 export function assetShimPlugin(): Plugin {
   return {
@@ -22,11 +24,9 @@ export function assetShimPlugin(): Plugin {
       const source = id.slice('\0servo-shim:'.length);
       if (source.endsWith('.html')) {
         // Serve the real widget HTML so tests can assert its contents.
-        const fs = require('node:fs') as typeof import('node:fs');
-        const path = require('node:path') as typeof import('node:path');
         const file = path.resolve(process.cwd(), "src", source.split("/").pop()!);
         try {
-          const html = fs.readFileSync(file, 'utf8');
+          const html = readFileSync(file, 'utf8');
           return `export default ${JSON.stringify(html)};`;
         } catch {
           return 'export default "";';

@@ -57,7 +57,7 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function mcpResult(value: object) {
+export function mcpResult(value: object) {
   const data: Record<string, unknown> = { ...value };
   const png = data.png;
   const images = data.images;

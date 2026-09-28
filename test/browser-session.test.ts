@@ -179,11 +179,11 @@ describe('runtime configuration wiring', () => {
     const log = config.log as (message: string) => void;
     log('short message');
     log('x'.repeat(3000));
-    const shortCall = consoleErrorSpy.mock.calls.find(([message]) =>
-      String(message).includes('[servo:logged-session] short message'));
+    const shortCall = consoleErrorSpy.mock.calls.find((call: unknown[]) =>
+      String(call[0]).includes('[servo:logged-session] short message'));
     expect(shortCall).toBeDefined();
-    const longCall = consoleErrorSpy.mock.calls.find(([message]) =>
-      String(message).includes('x'.repeat(2048)));
+    const longCall = consoleErrorSpy.mock.calls.find((call: unknown[]) =>
+      String(call[0]).includes('x'.repeat(2048)));
     expect(longCall).toBeDefined();
     // The runtime message is truncated to 2048 characters inside the prefix line.
     expect(String(longCall![0])).toBe(`[servo:logged-session] ${'x'.repeat(2048)}`);
@@ -198,9 +198,18 @@ describe('runtime configuration wiring', () => {
       fetchImplSpy(init);
       return { status: 200 } as Response;
     }));
+    const requestResponse = await fetchImpl(new Request('https://public.example/request'));
+    expect(requestResponse.status).toBe(200);
+    expect(fetchImplSpy.mock.calls[0][0]).toEqual({ redirect: 'manual' });
+    fetchImplSpy.mockClear();
     const response = await fetchImpl('https://public.example/api');
     expect(response.status).toBe(200);
     expect(fetchImplSpy.mock.calls[0][0]).toEqual({ redirect: 'manual' });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('host fetch failed'); }));
+    await expect(fetchImpl('https://public.example/failure')).rejects.toThrow('host fetch failed');
+    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/failure')).toBe('host fetch failed');
+    await expect(fetchImpl(new Request('https://public.example/request-failure'))).rejects.toThrow('host fetch failed');
+    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/request-failure')).toBe('host fetch failed');
     await expect(fetchImpl('http://127.0.0.1/x')).rejects.toThrow(TypeError);
     vi.unstubAllGlobals();
   });
@@ -593,7 +602,7 @@ describe('restore behaviour', () => {
     seedSnapshot(sql(), makeSnapshotJson());
     await expect(session.inspect()).rejects.toThrow(/could not reopen/);
     // The reset failure was intentionally discarded (no servo_session_reset_failed log).
-    expect(consoleErrorSpy.mock.calls.filter(([m]) => String(m).includes('reset_failed'))).toHaveLength(0);
+    expect(consoleErrorSpy.mock.calls.filter((call: unknown[]) => String(call[0]).includes('reset_failed'))).toHaveLength(0);
   });
 
   it('blocks restoring private URLs captured in snapshots', async () => {
@@ -722,6 +731,22 @@ describe('operate lifecycle', () => {
     expect(result.page).toBeDefined();
   });
 
+  it('preserves non-string and malformed WebDriver evaluation payloads', async () => {
+    const session = await activeSession({ evaluations: {
+      number: { Ok: { String: 42 } },
+      malformed: { Ok: { String: '{not json' } },
+    } });
+    expect((await session.evaluate('number')).value).toEqual({ Ok: { String: 42 } });
+    expect((await session.evaluate('malformed')).value).toEqual({ Ok: { String: '{not json' } });
+  });
+
+  it('rejects malformed page summary JSON returned by the browser', async () => {
+    await expect(activeSession({ evaluations: { [SUMMARY_MARKER]: okString('{not json') } }))
+      .rejects.toThrow('Servo returned an invalid page summary.');
+    await expect(activeSession({ evaluations: { [SUMMARY_MARKER]: { Ok: { String: 42 } } } }))
+      .rejects.toThrow('Servo returned an invalid page summary.');
+  });
+
   it('rejects scripts over 64 KiB', async () => {
     const session = await activeSession();
     await expect(session.evaluate('x'.repeat(64 * 1024 + 1))).rejects.toThrow(RangeError);
@@ -745,6 +770,40 @@ describe('operate lifecycle', () => {
     expect(names).toEqual(['font:000000', 'font:000001']);
   });
 
+  it('uses the zero font count when storage returns no count row', async () => {
+    const session = await activeSession({ registerFontFaces: 2 });
+    const database = sql();
+    const realExec = database.exec.bind(database);
+    database.exec = ((statement: string, ...params: unknown[]) => {
+      if (statement.includes('COUNT(DISTINCT name)')) return { toArray: () => [] } as never;
+      return realExec(statement, ...params);
+    }) as typeof database.exec;
+    expect(await session.registerFont(btoa('font'))).toEqual({ faces: 2 });
+    expect(database.table('browser_asset')!.rows[0].name).toBe('font:000000');
+  });
+
+  it('skips the post-operation snapshot when the runtime or session changes mid-operation', async () => {
+    const session = await activeSession();
+    const runtime = createdRuntimes.at(-1) as { options: FakeRuntimeOptions } | undefined;
+    if (!runtime) throw new Error('no runtime created');
+    const internal = session as unknown as { runtime: unknown };
+    const originalRuntime = internal.runtime;
+    runtime.options.pumpFactory = async () => {
+      internal.runtime = null;
+      return { settled: true };
+    };
+    await expect(session.wait(100)).resolves.toMatchObject({ title: expect.any(String) });
+    expect(internal.runtime).toBeNull();
+    internal.runtime = originalRuntime;
+
+    runtime.options.pumpFactory = async () => {
+      sql().table('browser_session')!.rows[0].status = 'closed';
+      return { settled: true };
+    };
+    await expect(session.wait(100)).resolves.toMatchObject({ title: expect.any(String) });
+    expect(sql().table('browser_session')!.rows[0].status).toBe('closed');
+  });
+
   it('serializes concurrent operations onto one queue', async () => {
     const session = await activeSession({ summary: { url: 'https://public.example/page' } });
     const [a, b, c] = await Promise.all([session.inspect(), session.wait(100), session.inspect()]);
@@ -763,7 +822,10 @@ function breakNextSerial(): void {
   const proto = (mod.ServoBrowserSession as any).prototype;
   const real = proto.serial as (this: unknown, operation: () => Promise<unknown>) => Promise<unknown>;
   let tripped = false;
-  vi.spyOn(proto, 'serial').mockImplementation(function (this: unknown, operation: () => Promise<unknown>) {
+  const serialSpy = vi.spyOn(proto, 'serial') as unknown as {
+    mockImplementation(implementation: (this: unknown, operation: () => Promise<unknown>) => Promise<unknown>): void;
+  };
+  serialSpy.mockImplementation(function (this: unknown, operation: () => Promise<unknown>) {
     if (!tripped) {
       tripped = true;
       return Promise.reject(new Error('discard failed'));
@@ -902,4 +964,3 @@ function lastRuntimeCalls(): string[] {
   if (!runtime) throw new Error('no runtime created');
   return [...runtime.calls] as string[];
 }
-

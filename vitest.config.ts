@@ -12,7 +12,7 @@ export default defineConfig({
       include: ['src/**'],
       exclude: ['src/assets.d.ts', 'src/browser-widget.html', 'test/setup.ts'],
       all: true,
-      thresholds: { lines: 100, functions: 100, statements: 100 },
+      thresholds: { lines: 100, functions: 100, statements: 100, branches: 100 },
       reporter: ['text', 'html', 'lcov'],
       reportsDirectory: 'coverage',
     },
