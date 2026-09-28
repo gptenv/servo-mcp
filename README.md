@@ -48,8 +48,9 @@ runtime cache still incurs Durable Object duration while resident, and
 Durable Objects do not remove the Worker CPU-time requirements of instantiating
 Servo or processing page actions.
 
-`servo_evaluate` runs synchronous JavaScript in the page realm. It can inspect
-Servo's DOM, CSS, canvas and browser APIs, but returned promises are not awaited.
+`servo_evaluate` runs JavaScript in the page realm and awaits a returned
+promise within the call's time budget. It can inspect Servo's DOM, CSS, canvas
+and browser APIs. Results are WebDriver-style JSON clones.
 Servo reports supported, partial, unsupported and unverified features through
 `servo_get_capabilities`.
 

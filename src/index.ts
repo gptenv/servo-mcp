@@ -174,7 +174,7 @@ function createServer(env: Env) {
 
   server.registerTool('servo_evaluate', {
     title: 'Servo evaluate',
-    description: 'Evaluate a synchronous JavaScript script in each selected page in parallel. Every entry carries its own script and budget. Results are serialized; returned promises are not awaited. Scripts can modify pages or cause external effects.',
+    description: 'Evaluate a JavaScript expression in each selected page in parallel. Every entry carries its own script and budget. If the script returns a promise, it is awaited within the budget. Results are WebDriver-style JSON clones, such as {"Ok":{"String":"…"}} or {"Err":…}; return JSON.stringify(value) for complex data. Scripts can modify pages or cause external effects.',
     inputSchema: evaluateSchema,
   }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => browser.evaluate(group.script, group.maxDurationMs))));
 
