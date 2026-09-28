@@ -1,1 +1,7 @@
-(empty)
+node_modules/
+.wrangler/
+.dev.vars
+.env
+servo-wasm/target/
+dist/
+coverage/
