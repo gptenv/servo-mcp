@@ -90,18 +90,12 @@ async function pump(runtime: ServoRuntime, maxDurationMs: number): Promise<void>
   if (!result.settled) throw new Error(`Servo did not settle within ${maxDurationMs} ms.`);
 }
 
-function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
-  return (async () => {
-    if (!runtime.evaluatePage(pageSummaryExpression)) {
-      throw new Error('Servo rejected the page summary evaluation.');
-    }
-    await pump(runtime, 10_000);
-    const parsed = parseEvaluationResult(runtime.pageResult());
-    if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
-      throw new Error('Servo returned an invalid page summary.');
-    }
-    return parsed as PageSummary;
-  })();
+async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
+  const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression, { maxDurationMs: 10_000 }));
+  if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
+    throw new Error('Servo returned an invalid page summary.');
+  }
+  return parsed as PageSummary;
 }
 
 function parseJsonResult(runtime: ServoRuntime): unknown {
@@ -219,9 +213,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private async captureSnapshot(runtime: ServoRuntime): Promise<void> {
-    if (!runtime.evaluatePage(resumeStateExpression)) throw new Error('Servo could not capture browser restore state.');
-    await pump(runtime, 2_000);
-    const value = parseJsonResult(runtime);
+    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression, { maxDurationMs: 2_000 }));
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error('Servo returned invalid browser restore state.');
     }
@@ -479,9 +471,8 @@ export class ServoBrowserSession extends DurableObject<Env> {
   async evaluate(script: string, maxDurationMs = 10_000): Promise<{ value: unknown; page: PageSummary }> {
     if (new TextEncoder().encode(script).byteLength > MAX_SCRIPT_BYTES) throw new RangeError('Script exceeds 64 KiB.');
     return this.operate(async (runtime) => {
-      if (!runtime.evaluatePage(script)) throw new Error('Servo rejected this page evaluation.');
-      await pump(runtime, maxDurationMs);
-      return { value: runtime.pageResult(), page: await pageSummary(runtime) };
+      const value = await runtime.evaluate(script, { maxDurationMs });
+      return { value, page: await pageSummary(runtime) };
     });
   }
 
