@@ -23,10 +23,13 @@ export interface FakeRuntimeOptions {
   resumeState?: ResumeStateScript[] | ((script: string) => ResumeStateScript);
   loadPageReturns?: boolean;
   loadHtmlReturns?: boolean;
+  loadHtmlThrows?: Error;
   reloadReturns?: boolean;
   goBackReturns?: boolean;
   goForwardReturns?: boolean;
   pumpResult?: { settled: boolean };
+  /** Optional factory consulted on every pump call (for scripted gating). */
+  pumpFactory?: () => Promise<{ settled: boolean }>;
   pumpThrows?: Error;
   screenshotPng?: Uint8Array;
   screenshotThrows?: Error;
@@ -61,8 +64,11 @@ export class FakeServoRuntime {
 
   private resumeStep(): ResumeStateScript {
     const script = this.options.resumeState;
-    if (!script) return {};
+    // Always advance the step counter, even when no steps are scripted, so
+    // `pageResult()` calls that occur before any `evaluatePage()` (e.g. during
+    // restore reloads) consume the correct scripted entry.
     const index = this.evaluatePageCount++;
+    if (!script) return {};
     if (typeof script === 'function') return script(String(index));
     return script[Math.min(index, script.length - 1)] ?? {};
   }
@@ -83,12 +89,25 @@ export class FakeServoRuntime {
     });
   }
 
+  private scriptedEvaluation(script: string): { hit: boolean; value?: unknown } {
+    const table = this.options.evaluations;
+    if (!table) return { hit: false };
+    if (script in table) return { hit: true, value: table[script] };
+    // Prefix matching lets tests target the long built-in page-summary and
+    // restore-state expressions without pasting their full text.
+    for (const key of Object.keys(table)) {
+      if (key.length > 0 && key !== '*' && script.startsWith(key)) return { hit: true, value: table[key] };
+    }
+    if ('*' in table) return { hit: true, value: table['*'] };
+    return { hit: false };
+  }
+
   evaluate(script: string, _opts?: { maxDurationMs?: number }): Promise<unknown> {
     this.calls.push('evaluate');
-    if (this.options.evaluations && script in this.options.evaluations) {
-      const value = this.options.evaluations[script];
-      this.evaluations.push({ script, result: value });
-      return Promise.resolve(value);
+    const scripted = this.scriptedEvaluation(script);
+    if (scripted.hit) {
+      this.evaluations.push({ script, result: scripted.value });
+      return Promise.resolve(scripted.value);
     }
     if (script.startsWith('JSON.stringify({url: location.href')) {
       const value: unknown = { Ok: { String: this.summaryJson(script) } };
@@ -96,6 +115,13 @@ export class FakeServoRuntime {
       return Promise.resolve(value);
     }
     if (this.options.evaluateThrows) return Promise.reject(this.options.evaluateThrows);
+    if (script.startsWith('JSON.stringify((()=>')) {
+      // Default scripted restore state so captureSnapshot succeeds unless the
+      // test explicitly scripts that expression via `evaluations`.
+      const value: unknown = validResumeStateValue;
+      this.evaluations.push({ script, result: value });
+      return Promise.resolve(value);
+    }
     const value = this.options.evaluateDefault ?? null;
     this.evaluations.push({ script, result: value });
     return Promise.resolve(value);
@@ -115,6 +141,7 @@ export class FakeServoRuntime {
 
   pumpUntilSettled(_opts?: { maxDurationMs?: number; maxTurns?: number; networkIdleMs?: number }): Promise<{ settled: boolean }> {
     this.calls.push('pump');
+    if (this.options.pumpFactory) return this.options.pumpFactory();
     if (this.options.pumpThrows) return Promise.reject(this.options.pumpThrows);
     return Promise.resolve(this.options.pumpResult ?? { settled: true });
   }
@@ -126,6 +153,7 @@ export class FakeServoRuntime {
 
   loadHtml(html: string, _opts?: { url?: string }): boolean {
     this.calls.push(`loadHtml:${html.slice(0, 32)}`);
+    if (this.options.loadHtmlThrows) throw this.options.loadHtmlThrows;
     return this.options.loadHtmlReturns ?? true;
   }
 
@@ -182,6 +210,25 @@ export class FakeServoRuntime {
     if (this.options.resetThrows) throw new Error('fake reset failed');
   }
 }
+
+/** A summary object missing required keys, used to trigger validation errors. */
+export const invalidSummary = { nope: true };
+
+/** The default valid restore-state payload returned by scripted evaluations. */
+const validResumeStateValue = {
+  Ok: {
+    String: JSON.stringify({
+      version: 1,
+      url: 'https://public.example/page',
+      scrollX: 0,
+      scrollY: 0,
+      fields: [],
+      localStorage: [],
+      sessionStorage: [],
+      cookies: '',
+    }),
+  },
+};
 
 export function snapshotScriptMarker(): string {
   return 'JSON.stringify((()=>';
