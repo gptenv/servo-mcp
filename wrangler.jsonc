@@ -1,0 +1,26 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/configuration/schema.json",
+  "name": "servo-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["servo-wasm/target/wasm32-unknown-unknown/production-stripped/servo_js_wasm.wasm"],
+      "fallthrough": true
+    }
+  ],
+  "vars": {
+    "APP_NAME": "Servo MCP"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "BROWSER_SESSIONS", "class_name": "ServoBrowserSession" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1-servo-browser-sessions", "new_sqlite_classes": ["ServoBrowserSession"] }
+  ]
+}

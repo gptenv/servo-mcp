@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Servo browser</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
+  body { margin: 0; padding: 16px; }
+  form { display: grid; gap: 10px; }
+  label { display: grid; gap: 4px; }
+  input, textarea, button { font: inherit; padding: 8px; }
+  textarea { min-height: 90px; resize: vertical; }
+  button { justify-self: start; cursor: pointer; }
+  #status { min-height: 1.5em; }
+  #preview { display: block; max-width: 100%; border: 1px solid #8886; }
+  pre { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
+</style>
+<main>
+  <h1>Servo browser</h1>
+  <form id="browser-form">
+    <label>Page URL <input id="url" type="url" placeholder="https://example.com" required></label>
+    <label>Optional page script <textarea id="script" placeholder="document.title"></textarea></label>
+    <button>Load and render</button>
+  </form>
+  <p>Session: <code id="session-id">none</code> <button id="close-session" type="button" disabled>Close session</button></p>
+  <p id="status" role="status"></p>
+  <img id="preview" alt="Screenshot rendered by Servo">
+  <pre id="details"></pre>
+</main>
+<script>
+  const pending = new Map();
+  let nextId = 1;
+  let sessionId = null;
+  function call(method, params) {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+    });
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+    if (message.id !== undefined && pending.has(message.id)) {
+      const request = pending.get(message.id);
+      pending.delete(message.id);
+      message.error ? request.reject(message.error) : request.resolve(message.result);
+      return;
+    }
+    if (message.method === 'ui/notifications/tool-result') render(message.params?.structuredContent);
+    if (message.method === 'ui/notifications/tool-input') {
+      const input = message.params?.arguments ?? message.params;
+      if (input?.url) document.querySelector('#url').value = input.url;
+    }
+  });
+  function render(result, content = []) {
+    if (!result) return;
+    document.querySelector('#status').textContent = result.title || result.url || 'Rendered';
+    document.querySelector('#details').textContent = JSON.stringify(result, null, 2);
+    const image = content.find(part => part.type === 'image' && part.mimeType === 'image/png');
+    if (image) document.querySelector('#preview').src = `data:image/png;base64,${image.data}`;
+  }
+  document.querySelector('#browser-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const status = document.querySelector('#status');
+    status.textContent = 'Loading page…';
+    try {
+      const created = await call('tools/call', { name: 'servo_session_create', arguments: {
+        sessions: [{ url: document.querySelector('#url').value }],
+      } });
+      if (created.isError) throw new Error(created.content?.[0]?.text || 'Servo could not start a session.');
+      const createdSession = created.structuredContent?.results?.[0];
+      if (!createdSession?.ok) throw new Error(createdSession?.error || 'Servo could not start a session.');
+      sessionId = createdSession.sessionId;
+      document.querySelector('#session-id').textContent = sessionId || 'unavailable';
+      document.querySelector('#close-session').disabled = !sessionId;
+      const script = document.querySelector('#script').value;
+      if (script) {
+        const evaluated = await call('tools/call', { name: 'servo_evaluate', arguments: { sessions: [{ sessionId, script }] } });
+        if (evaluated.isError) throw new Error(evaluated.content?.[0]?.text || 'Servo evaluation failed.');
+        const evaluationResult = evaluated.structuredContent?.results?.[0];
+        if (!evaluationResult?.ok) throw new Error(evaluationResult?.error || 'Servo evaluation failed.');
+      }
+      const rendered = await call('tools/call', { name: 'servo_screenshot', arguments: { sessions: [{ sessionId }] } });
+      if (rendered.isError) throw new Error(rendered.content?.[0]?.text || 'Servo could not render the page.');
+      const screenshotResult = rendered.structuredContent?.results?.[0];
+      if (!screenshotResult?.ok) throw new Error(screenshotResult?.error || 'Servo could not render the page.');
+      render(screenshotResult.result, rendered.content);
+      status.textContent = 'Session ready';
+    } catch (error) {
+      status.textContent = String(error?.message ?? error);
+    }
+  });
+  document.querySelector('#close-session').addEventListener('click', async () => {
+    if (!sessionId) return;
+    const status = document.querySelector('#status');
+    try {
+      const closed = await call('tools/call', { name: 'servo_session_close', arguments: { sessionIds: [sessionId] } });
+      if (closed.isError) throw new Error(closed.content?.[0]?.text || 'Could not close Servo session.');
+      const closeResult = closed.structuredContent?.results?.[0];
+      if (!closeResult?.ok) throw new Error(closeResult?.error || 'Could not close Servo session.');
+      sessionId = null;
+      document.querySelector('#session-id').textContent = 'none';
+      document.querySelector('#close-session').disabled = true;
+      status.textContent = 'Session closed';
+    } catch (error) {
+      status.textContent = String(error?.message ?? error);
+    }
+  });
+</script>
+</html>
