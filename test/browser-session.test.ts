@@ -853,27 +853,6 @@ describe('operate lifecycle', () => {
   });
 });
 
-/**
- * Makes the next `serial()` invocation (the idle-TTL discard callback) reject,
- * simulating a storage-layer failure while the cached runtime is discarded.
- */
-function breakNextSerial(): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const proto = (mod.ServoBrowserSession as any).prototype;
-  const real = proto.serial as (this: unknown, operation: () => Promise<unknown>) => Promise<unknown>;
-  let tripped = false;
-  const serialSpy = vi.spyOn(proto, 'serial') as unknown as {
-    mockImplementation(implementation: (this: unknown, operation: () => Promise<unknown>) => Promise<unknown>): void;
-  };
-  serialSpy.mockImplementation(function (this: unknown, operation: () => Promise<unknown>) {
-    if (!tripped) {
-      tripped = true;
-      return Promise.reject(new Error('discard failed'));
-    }
-    return real.call(this, operation);
-  });
-}
-
 describe('session termination', () => {
   it('closes sessions, clears runtimes, and wipes persisted state', async () => {
     scriptRuntime({});
@@ -953,35 +932,30 @@ describe('session termination', () => {
     expect(sql().table('browser_session')!.rows[0].status).toBe('active');
   });
 
-  it('discards the cached runtime after the idle TTL elapses', async () => {
+  it('does not schedule an app-level timer to retain the runtime', async () => {
     scriptRuntime({});
     const session = await newSession();
     await session.initialize(initOptions());
     expect((await session.getStatus()).runtimeAvailable).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(90_000);
-    expect((await session.getStatus()).runtimeAvailable).toBe(false);
-    expect(consoleErrorSpy).not.toHaveBeenCalledWith(expect.stringContaining('servo_runtime_discard_failed'));
+    // The unit harness does not emulate Cloudflare hibernation, but the
+    // application itself must not keep the Durable Object alive with a timer.
+    expect((await session.getStatus()).runtimeAvailable).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('restores the full cookie jar after the WASM runtime is discarded', async () => {
+  it('restores the full cookie jar when a runtime must be recreated', async () => {
     scriptRuntime({});
     const session = await newSession();
     await session.initialize(initOptions());
     expect(createdRuntimes[0].calls).toContain('exportCookieState');
-    await vi.advanceTimersByTimeAsync(90_000);
+    // A trapped runtime follows the same snapshot restore path used after a
+    // Durable Object instance is hibernated and its WASM heap is gone.
+    createdRuntimes[0].trapped = true;
     await session.inspect();
     expect(createdRuntimes).toHaveLength(2);
     expect(createdRuntimes[1].restoredCookies).toEqual([new Uint8Array([1, 2, 3])]);
-  });
-
-  it('logs failures that occur while discarding the idle runtime', async () => {
-    scriptRuntime({});
-    const session = await newSession();
-    await session.initialize(initOptions());
-    breakNextSerial();
-    await vi.advanceTimersByTimeAsync(90_000);
-    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('servo_runtime_discard_failed'));
-    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('discard failed'));
   });
 
   it('marks sessions failed when a required restore breaks mid-operation', async () => {

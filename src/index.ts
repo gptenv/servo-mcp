@@ -85,7 +85,7 @@ function createServer(env: Env) {
   const server = new McpServer({ name: 'servo-mcp', version: '0.3.0' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Create one session per tab, keep a mapping from a short description to its returned sessionId, and pass that exact ID in the sessions list for later operations. Each focused browser tool accepts multiple per-session entries and runs them concurrently. Close only the sessions you are done with.',
-      'A live WASM runtime is cached for 90 seconds after activity; afterward, the selected session is reopened from a persisted snapshot. No prior tool actions are replayed.',
+      'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
       'Each tool keeps one focused purpose. For example, servo_navigate accepts multiple {sessionId,url,maxDurationMs} entries and servo_click accepts multiple entries with independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident.',
       'Snapshots preserve the current URL, viewport, scroll position, common form values, every localStorage and sessionStorage entry, the full cookie jar including HttpOnly cookies, IndexedDB schemas and records for each visited origin, and registered fonts. Restoring reloads the page so page scripts run again; JavaScript heap state, browser history, and arbitrary in-memory DOM/application state are not restored. Cache Storage remains runtime-local and incomplete. Sessions expire after 30 days without use or when closed with servo_session_close.',
       'A sessionId is a bearer capability because this public MCP server currently has no authentication. Do not share it. Only navigate to public HTTP(S) pages; private/local network targets are blocked.',
@@ -274,7 +274,7 @@ function createServer(env: Env) {
 
   server.registerTool('servo_get_capabilities', {
     title: 'Servo get capabilities',
-    description: 'Return supported, partial, unsupported, and unverified Servo features for multiple selected sessions in parallel.',
+    description: 'Return capabilities of the Cloudflare WASM Worker port for multiple selected sessions in parallel. The report distinguishes supported, partial, unsupported, and unverified features; unsupportedReasons explains known port constraints. It does not describe every feature in Servo native builds.',
     inputSchema: capabilitiesSchema,
   }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser) => browser.capabilities())));
 

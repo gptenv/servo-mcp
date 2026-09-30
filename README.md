@@ -58,23 +58,27 @@ truncated, and the snapshot has no app-level byte ceiling. Browser storage
 quotas, Durable Object storage capacity, and Worker runtime resources still
 apply. Cache Storage remains runtime-local and incomplete in this Servo build.
 
-The live Servo WASM runtime is cached for 90 seconds after activity; later
-browser-tool calls automatically start a fresh runtime, restore the saved tab
-state, and reload the current page so its scripts see that state. The checkpoint
-also preserves URL, viewport, scroll position, common form values, registered
-fonts, and the source for inline HTML pages. It does not preserve the JavaScript
-heap, browser history, arbitrary DOM mutations, or application state held only
-in memory. Restoring never replays prior tool actions. Sessions are deleted
-after 30 days without use or when closed; closing explicitly also deletes the
-snapshot and saved assets. The 90-second runtime cache still incurs Durable
-Object duration while resident, and Durable Objects do not remove the Worker
-CPU-time requirements of instantiating Servo or processing page actions.
+The live Servo WASM runtime has no application-level idle hold. When a browser
+tool call and its snapshot writes finish, the Durable Object is eligible for
+Cloudflare-managed hibernation; a later call automatically restores the saved
+tab state and reloads the current page. Cloudflare currently hibernates eligible
+objects after about 10 seconds, but controls the exact timing. The checkpoint
+preserves URL, viewport, scroll position, common form values, registered fonts,
+and the source for inline HTML pages. It does not preserve the JavaScript heap,
+browser history, arbitrary DOM mutations, or application state held only in
+memory. Restoring never replays prior tool actions. Sessions are deleted after
+30 days without use or when closed; closing explicitly also deletes the
+snapshot and saved assets. Letting the Durable Object hibernate avoids billing
+for an application timer that holds it awake; restoring Servo still uses Worker
+CPU time. See [Cloudflare's Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
 
 `servo_evaluate` runs JavaScript in the page realm and awaits a returned
 promise within the call's time budget. It can inspect Servo's DOM, CSS, canvas
 and browser APIs. Results are WebDriver-style JSON clones.
 Servo reports supported, partial, unsupported and unverified features through
-`servo_get_capabilities`.
+`servo_get_capabilities`. This describes the Cloudflare WASM Worker port, not
+every feature implemented by Servo's native builds; `unsupportedReasons`
+explains known port-specific constraints.
 
 The endpoint currently has no authentication. A `sessionId` is therefore a
 bearer capability: anyone who obtains it can use or close that session. Do not

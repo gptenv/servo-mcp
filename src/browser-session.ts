@@ -8,7 +8,6 @@ const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_TOOL_DURATION_MS = 15_000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
-const RUNTIME_IDLE_TTL_MS = 90_000;
 const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
 const SNAPSHOT_CHUNK_CHARS = 200_000;
@@ -242,7 +241,6 @@ function snapshotForOrigin(snapshot: ResumeSnapshot, url: string): ResumeSnapsho
 
 export class ServoBrowserSession extends DurableObject<Env> {
   private runtime: ServoRuntime | undefined;
-  private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private queue: Promise<void> = Promise.resolve();
   // Host fetch failures (DNS, TLS, connection errors) during the current
   // operation, keyed by URL, so a failed page load is reported to the caller.
@@ -626,22 +624,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
       Date.now(), expiresAt, 'active',
     );
     await this.ctx.storage.setAlarm(expiresAt);
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    // Retain the live runtime briefly as a cache. The snapshot and session lease
-    // outlive it, so a hibernated or evicted DO can restore the tab on demand.
-    this.idleTimer = setTimeout(() => {
-      this.serial(async () => {
-        this.idleTimer = undefined;
-        this.clearRuntime();
-      }).catch((error: unknown) => {
-        console.error(JSON.stringify({ event: 'servo_runtime_discard_failed', error: String(error) }));
-      });
-    }, RUNTIME_IDLE_TTL_MS);
+    // Do not retain the runtime with a JS timer. Any pending setTimeout keeps
+    // this Durable Object from hibernating and accruing duration charges. Once
+    // the request and snapshot writes finish, let Cloudflare hibernate the DO;
+    // a later browser operation restores the runtime from the durable snapshot.
   }
 
   private clearRuntime(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = undefined;
     try {
       this.runtime?.reset();
     } catch (error) {
@@ -690,7 +679,6 @@ export class ServoBrowserSession extends DurableObject<Env> {
         throw new Error(`Saved tab could not be restored: ${String(error)}`);
       }
     }
-    await this.renewLease();
     return this.runtime;
   }
 
