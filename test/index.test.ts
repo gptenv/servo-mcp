@@ -48,7 +48,7 @@ function makeSession(): Session {
     initialize: vi.fn(async (options: unknown) => ({ status: 'active', options })),
     getStatus: vi.fn(async () => ({ status: 'active' })),
     close: vi.fn(async () => ({ status: 'closed' })),
-    navigate: vi.fn(async (url: string) => ({ action: 'navigate', page: { url } })),
+    navigate: vi.fn(async (url: string) => ({ action: 'navigate', page: { url, title: 'Example', text: 'visible page text' } })),
     inspect: vi.fn(async () => ({ url: 'https://example.com/', title: 'Example', text: 'body' })),
     evaluate: vi.fn(async (script: string) => ({ action: 'evaluate', page: { script } })),
     click: vi.fn(async () => ({ action: 'click' })),
@@ -123,7 +123,9 @@ describe('MCP Worker routes and server registration', () => {
     expect(harness.servers).toHaveLength(1);
     expect([...harness.tools.keys()]).toEqual([
       'servo_session_create', 'servo_session_status', 'servo_session_close', 'servo_navigate',
-      'servo_inspect', 'servo_evaluate', 'servo_click', 'servo_type_text', 'servo_press_key',
+      'servo_inspect', 'servo_http_request', 'servo_http_get', 'servo_http_post', 'servo_http_put',
+      'servo_http_patch', 'servo_http_delete', 'servo_http_head', 'servo_http_options',
+      'servo_evaluate', 'servo_click', 'servo_type_text', 'servo_press_key',
       'servo_scroll', 'servo_history', 'servo_reload', 'servo_wait', 'servo_screenshot',
       'servo_register_font', 'servo_get_capabilities',
     ]);
@@ -220,6 +222,10 @@ describe('focused browser tools', () => {
       expect(result.results[0]).toMatchObject({ sessionId, ok: true });
       expect((defaultSession[method] as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
     }
+    const browsed = structured(await invoke('servo_navigate', { sessions: [{ sessionId, url: 'https://example.com/' }] }));
+    expect(browsed.results[0].result.results[0]).toEqual({
+      title: 'Example', url: 'https://example.com/', snippet: 'visible page text', content: 'visible page text',
+    });
     expect(defaultSession.navigate).toHaveBeenCalledWith('https://example.com/', 10_000);
     expect(defaultSession.click).toHaveBeenCalledWith(3, 4, 0, 10_000);
     expect(defaultSession.scroll).toHaveBeenCalledWith(1, 2, undefined, undefined, 10_000);
@@ -284,5 +290,54 @@ describe('focused browser tools', () => {
     const duplicate = await invoke('servo_screenshot', { sessions: [{ sessionId }, { sessionId }] });
     expect(duplicate.isError).toBe(true);
     expect(duplicate.content[0].text).toMatch(/only once/);
+  });
+
+  it('sends configurable HTTP requests and returns headers, status, body and web-style page results', async () => {
+    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => {
+      expect(init.method).toBe('POST');
+      expect(new Headers(init.headers).get('x-test')).toBe('overridden');
+      expect(await new Response(init.body).text()).toBe('{"hello":"world"}');
+      return new Response('<html><title>Sample Page</title><body><h1>Hello</h1><script>secret()</script><p>Visible &amp; useful</p></body></html>', {
+        status: 201, headers: { 'content-type': 'text/html; charset=utf-8', 'x-origin': 'fixture' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = structured(await invoke('servo_http_request', {
+        url: 'https://example.com/api', method: 'POST', headers: { 'x-test': 'overridden' },
+        body: '{"hello":"world"}',
+      }));
+      expect(result.request).toMatchObject({ method: 'POST', url: 'https://example.com/api' });
+      expect(result.response).toMatchObject({ status: 201, ok: true, contentType: 'text/html; charset=utf-8', headers: { 'x-origin': 'fixture' } });
+      expect(result.body).toContain('<title>Sample Page</title>');
+      expect(result.results).toEqual([{ title: 'Sample Page', url: 'https://example.com/api', snippet: 'Hello\nVisible & useful', content: 'Hello\nVisible & useful' }]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('supports verb-specific tools and blocks unsafe redirect targets and invalid method/body combinations', async () => {
+    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => init.method === 'OPTIONS'
+      ? new Response(null, { status: 204 })
+      : new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/private' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const denied = await invoke('servo_http_get', { url: 'https://example.com/' });
+      expect(denied.isError).toBe(true);
+      expect(denied.content[0].text).toMatch(/Private, local/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const options = await invoke('servo_http_options', { url: 'https://example.com/', headers: { 'x-check': 'yes' } });
+      expect(options.structuredContent.request.method).toBe('OPTIONS');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const getWithBody = await invoke('servo_http_request', { url: 'https://example.com/', method: 'GET', body: 'invalid' });
+      expect(getWithBody.isError).toBe(true);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 207 }));
+      const extension = await invoke('servo_http_request', { url: 'https://example.com/', method: 'PROPFIND' });
+      expect(extension.structuredContent.request.method).toBe('PROPFIND');
+      expect(extension.structuredContent.response.status).toBe(207);
+      const unsupported = await invoke('servo_http_request', { url: 'https://example.com/', method: 'CONNECT' });
+      expect(unsupported.isError).toBe(true);
+      expect(unsupported.content[0].text).toMatch(/forbidden by the Fetch API/);
+    } finally { vi.unstubAllGlobals(); }
   });
 });

@@ -21,8 +21,24 @@ does not hide the others.
 - `servo_session_create`, `servo_session_status`, `servo_session_close`
 - `servo_navigate`, `servo_reload`, `servo_history`
 - `servo_inspect`, `servo_evaluate`, `servo_get_capabilities`
+- `servo_http_request`, plus `servo_http_get`, `servo_http_post`, `servo_http_put`,
+  `servo_http_patch`, `servo_http_delete`, `servo_http_head`, and `servo_http_options`
 - `servo_click`, `servo_type_text`, `servo_press_key`, `servo_scroll`, `servo_wait`
 - `servo_screenshot`, `servo_register_font`
+
+The HTTP request tools call public HTTP(S) endpoints directly. The general tool
+accepts any valid Fetch API method (including extension methods), request
+headers and a UTF-8 body; convenience tools provide common verbs. Results
+include the HTTP status, final URL, response headers, bounded response body
+(base64 for binary content), and a `results` array with title, URL, snippet,
+and readable page content. Redirect destinations are checked against the
+public-network policy, cross-origin redirects discard credentials, and the
+request duration and response size are capped. The HTTP tools can still cause
+remote side effects, so use POST/PUT/PATCH/DELETE only when intended.
+
+`servo_navigate` and `servo_inspect` also include this same citation-style
+`results` entry for rendered pages, while retaining their existing `page`
+summary for compatibility.
 
 For example, create several tabs with `servo_session_create` using
 `{ "sessions": [{ "url": "https://example.com" }, { "url": "https://example.org" }] }`.

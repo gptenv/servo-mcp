@@ -4,6 +4,7 @@ import { z } from 'zod';
 import widgetHtml from './browser-widget.html';
 import { ServoBrowserSession, type BrowserSessionOptions } from './browser-session';
 import { assertPublicHttpUrl } from './security';
+import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser.html';
 const MAX_TOOL_DURATION_MS = 15_000;
@@ -89,6 +90,7 @@ function createServer(env: Env) {
       'Snapshots preserve the current URL, viewport, scroll position, common form values, web storage, script-visible cookies, and registered fonts. Restoring reloads the page, so page scripts run again; JavaScript heap state, HttpOnly cookies, and arbitrary in-memory DOM/application state are not restored. Sessions expire after 30 days without use or when closed with servo_session_close.',
       'A sessionId is a bearer capability because this public MCP server currently has no authentication. Do not share it. Only navigate to public HTTP(S) pages; private/local network targets are blocked.',
       'servo_click, servo_type_text, servo_press_key, and servo_evaluate may cause page-side effects. Use them only for actions the user requested, and do not repeat a call merely because its response was unclear.',
+      'HTTP request tools make outbound requests to public HTTP(S) URLs. They accept custom request headers and bounded text bodies, follow at most five redirects while rechecking each destination, and return status, response headers, body data, and citation-style page results. Requests can cause remote side effects; use the requested method and endpoint only.',
       'Servo capabilities are partial. Use servo_get_capabilities and inspect returned errors before concluding a page is broken.',
     ].join(' '),
   });
@@ -121,6 +123,12 @@ function createServer(env: Env) {
       return { sessionId: group.sessionId, ok: false, error: error instanceof Error ? error.message.slice(0, 2048) : 'Servo request failed.' };
     }
     })) };
+  };
+
+  const withWebResult = <T extends { page?: { url: string; title: string; text: string } }>(value: T) => {
+    if (!value.page) return value;
+    const { page } = value;
+    return { ...value, results: [{ title: page.title || page.url, url: page.url, snippet: page.text.slice(0, 500), content: page.text }] };
   };
 
   server.registerTool('servo_session_create', {
@@ -159,18 +167,35 @@ function createServer(env: Env) {
 
   server.registerTool('servo_navigate', {
     title: 'Servo navigate',
-    description: 'Navigate multiple selected tabs in parallel. Each sessions entry carries its own sessionId, URL, and optional load budget. Private/local network addresses are blocked.',
+    description: 'Browse to a public URL in multiple selected tabs. Returns the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. Each sessions entry has its own load budget; private/local network addresses are blocked.',
     inputSchema: navigateSchema,
   }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) => {
     assertPublicHttpUrl(group.url);
-    return browser.navigate(group.url, group.maxDurationMs);
+    return browser.navigate(group.url, group.maxDurationMs).then(withWebResult);
   })));
 
   server.registerTool('servo_inspect', {
     title: 'Servo inspect',
-    description: 'Read the URL, title, and visible body text for multiple selected tabs in parallel.',
+    description: 'Read the final URL, page title, and visible text for multiple selected tabs. Also returns a web-search-style result entry with title, URL, snippet, and content.',
     inputSchema: inspectSchema,
-  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser) => browser.inspect())));
+  }, async ({ sessions }) => safely(async () =>
+    runSessions(sessions, (browser) => browser.inspect().then((page) => withWebResult({ page }))),
+  ));
+
+  server.registerTool('servo_http_request', {
+    title: 'Servo HTTP request',
+    description: 'Send a general public HTTP(S) request with any valid Fetch API method (including custom extension methods), optional custom request headers and UTF-8 body, redirect policy, timeout, and response-size limit. Returns status, response headers, body (or base64 for binary), and citation-style page results. CONNECT, TRACE, and TRACK are forbidden by the Fetch API.',
+    inputSchema: httpRequestSchema,
+  }, async (input) => safely(() => requestHttp(input)));
+
+  for (const method of HTTP_METHODS) {
+    const name = `servo_http_${method.toLowerCase()}`;
+    server.registerTool(name, {
+      title: `Servo HTTP ${method}`,
+      description: `Send a ${method} request to a public HTTP(S) URL with optional custom request headers${['GET', 'HEAD'].includes(method) ? '' : ' and UTF-8 body'}. Returns response status, headers, bounded body data, and citation-style page results.`,
+      inputSchema: httpVerbRequestSchema,
+    }, async (input) => safely(() => requestHttp({ ...input, method })));
+  }
 
   server.registerTool('servo_evaluate', {
     title: 'Servo evaluate',
