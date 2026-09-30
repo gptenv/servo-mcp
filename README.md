@@ -49,20 +49,26 @@ navigate them with per-tab URLs using
 Keep each returned `sessionId` mapped to its tab; there is no session-list tool.
 Use `servo_session_close` with a `sessionIds` array when those tabs are done.
 
-Each session is routed to its own SQLite-backed Durable Object, which serializes
-operations and stores a serialized restore snapshot. The live Servo WASM
-runtime is only cached for 90 seconds after activity; later browser-tool calls
-automatically start a fresh runtime and reopen the current tab. The checkpoint
-preserves URL, viewport, scroll position, common form values, local/session
-storage, script-visible cookies, registered fonts, and the source for inline
-HTML pages. It does not preserve the JavaScript heap, HttpOnly cookies, browser
-history, arbitrary DOM mutations, or application state held only in memory.
-Restoring reloads the page and runs its scripts again; it never replays prior
-tool actions. Sessions are deleted after 30 days without use or when closed.
-Closing explicitly also deletes the snapshot and saved assets. The 90-second
-runtime cache still incurs Durable Object duration while resident, and
-Durable Objects do not remove the Worker CPU-time requirements of instantiating
-Servo or processing page actions.
+Each session is one tab routed to its own SQLite-backed Durable Object, which
+serializes operations and stores a chunked restore snapshot. Each completed
+browser-tool call checkpoints every `localStorage` and `sessionStorage` entry,
+the complete cookie jar (including `HttpOnly` cookies), and each visited
+origin's IndexedDB database schema and records. Storage keys and values are not
+truncated, and the snapshot has no app-level byte ceiling. Browser storage
+quotas, Durable Object storage capacity, and Worker runtime resources still
+apply. Cache Storage remains runtime-local and incomplete in this Servo build.
+
+The live Servo WASM runtime is cached for 90 seconds after activity; later
+browser-tool calls automatically start a fresh runtime, restore the saved tab
+state, and reload the current page so its scripts see that state. The checkpoint
+also preserves URL, viewport, scroll position, common form values, registered
+fonts, and the source for inline HTML pages. It does not preserve the JavaScript
+heap, browser history, arbitrary DOM mutations, or application state held only
+in memory. Restoring never replays prior tool actions. Sessions are deleted
+after 30 days without use or when closed; closing explicitly also deletes the
+snapshot and saved assets. The 90-second runtime cache still incurs Durable
+Object duration while resident, and Durable Objects do not remove the Worker
+CPU-time requirements of instantiating Servo or processing page actions.
 
 `servo_evaluate` runs JavaScript in the page realm and awaits a returned
 promise within the call's time budget. It can inspect Servo's DOM, CSS, canvas
@@ -110,13 +116,13 @@ combined Worker bundle must be measured before any deployment.
 
 ## Test deployment
 
-Deployed on 2026-09-29 to the authenticated Cloudflare account. The live Worker
+Deployed on 2026-09-30 to the authenticated Cloudflare account. The live Worker
 uses Durable Object-backed browser sessions and the focused multi-session MCP
 tools documented above.
 
 - MCP endpoint: <https://servo-mcp.defcronyke.workers.dev/mcp>
 - Health: <https://servo-mcp.defcronyke.workers.dev/health>
-- Deployed Worker version: `5a982dc4-1ccc-4e72-84f8-10cc81e2daa3` (servo-wasm `726cf4dd3`, ABI 10)
+- Deployed Worker version: `50cd14f7-3bc4-4903-8dca-c0eb0209aa38` (servo-wasm `c032c2791`, ABI 11)
 
 The `/health` endpoint and MCP `tools/list` response were verified against the
 live Worker. The endpoint currently has no authentication and is public for
@@ -124,7 +130,7 @@ testing. Before broader publication, decide the access
 policy; add OAuth and consent before private or user-scoped use. Measure CPU
 and total isolate memory on the intended Workers plan and review Cloudflare and
 ChatGPT submission requirements before publication. The deployed bundle was
-49,945.88 KiB (15,263.16 KiB gzip) in Wrangler's dry run, below the 64 MiB Worker limit.
+49,987.34 KiB (15,274.21 KiB gzip) in Wrangler's dry run, below the 64 MiB Worker limit.
 
 The MCP handler validates localhost and `workers.dev` Host/Origin defaults;
 custom domains should also be protected by Cloudflare routing and deployment

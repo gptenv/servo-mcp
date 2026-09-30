@@ -106,7 +106,7 @@ const sql = () => state.storage.sql as unknown as import('./helpers/fake-sql').F
  * captureSnapshot succeeds unless a test overrides it. Raw objects are accepted
  * directly by parseEvaluationResult; string values are JSON-parsed first.
  */
-const RESUME_MARKER = 'JSON.stringify((()=>';
+const RESUME_MARKER = '(async()=>{\n  const nodePath=';
 const SUMMARY_MARKER = 'JSON.stringify({url: location.href';
 
 /** Wrap a payload the way the real adapter returns page-evaluation results. */
@@ -374,21 +374,67 @@ describe('initialize', () => {
     expect(sql().table('browser_session')!.rows[0].status).toBe('failed');
   });
 
-  it('logs (but survives) snapshots that exceed the storage limit', async () => {
-    // A restore-state payload whose value exceeds the 1.5 MiB snapshot budget
-    // makes saveSnapshot throw a RangeError during the operate() phase; the
-    // error is logged and swallowed so the operation still returns its result.
+  it('persists every Web Storage entry and large values across multiple snapshot chunks', async () => {
+    const largeValue = 'y'.repeat(2 * 1024 * 1024);
+    const localStorage = Array.from({ length: 75 }, (_, index) => [`key-${index}`, `value-${index}`] as [string, string]);
+    localStorage.push(['large-value', largeValue]);
+    const splitSurrogateValue = `${'x'.repeat(32_767)}🙂tail`;
+    localStorage.push(['unicode-value', splitSurrogateValue]);
     scriptRuntime({
       summary: { url: 'about:blank', title: 't', text: '' },
-      evaluations: { [RESUME_MARKER]: okString({ ...validResumeState, cookies: 'y'.repeat(2 * 1024 * 1024) }) },
+      evaluations: {
+        [RESUME_MARKER]: okString({
+          ...validResumeState,
+          origin: 'https://public.example',
+          localStorage,
+          sessionStorage: [['large-session-value', largeValue]],
+          indexedDB: [{
+            name: 'large-db', version: 1,
+            stores: [{ name: 'items', keyPath: 'id', autoIncrement: false, indexes: [], records: [
+              { key: { root: 1, nodes: [] }, primaryKey: { root: 1, nodes: [] }, value: { root: { r: 0 }, nodes: [{ t: 'object', e: [['id', 1], ['payload', largeValue]] }] } },
+            ] }],
+          }],
+        }),
+      },
     });
     const session = await newSession();
     seedActiveRow(sql(), Date.now() + 60_000);
     seedSnapshot(sql(), makeSnapshotJson());
     const page = await session.inspect();
     expect(page.title).toBe('t');
-    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('servo_snapshot_failed'));
-    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('storage limit'));
+    const captureScript = createdRuntimes.at(-1)!.evaluations.find((call: { script: string }) => call.script.includes('const nodePath='))?.script;
+    expect(captureScript).toMatch(/^\(async\(\)=>\{/);
+    expect(captureScript).toMatch(/\}\)\(\)$/);
+    expect(captureScript).toContain('store.getAllKeys()');
+    expect(captureScript).toContain('store.getAll()');
+    const header = JSON.parse(sql().table('browser_snapshot')!.rows[0].snapshot_json as string) as {
+      version: number;
+      originAssets: Record<string, string>;
+    };
+    expect(header.version).toBe(3);
+    const assetName = header.originAssets['https://public.example'];
+    const chunks = sql().table('browser_asset')!.rows
+      .filter((row) => row.name === assetName)
+      .sort((a, b) => Number(a.chunk_index) - Number(b.chunk_index));
+    expect(chunks.length).toBeGreaterThan(1);
+    type SavedOriginState = {
+      localStorage: [string, string][];
+      sessionStorage: [string, string][];
+      indexedDB: Array<{
+        stores: Array<{
+          records: Array<{
+            value: { nodes: Array<{ e: Array<[string, string]> }> };
+          }>;
+        }>;
+      }>;
+    };
+    const saved = JSON.parse(chunks.map((row) => row.chunk_text).join('')) as SavedOriginState;
+    expect(saved.localStorage).toHaveLength(77);
+    expect(saved.localStorage[75]).toEqual(['large-value', largeValue]);
+    expect(saved.localStorage[76]).toEqual(['unicode-value', splitSurrogateValue]);
+    expect(saved.sessionStorage).toEqual([['large-session-value', largeValue]]);
+    expect(saved.indexedDB[0].stores[0].records[0].value.nodes[0].e[1]).toEqual(['payload', largeValue]);
+    expect(consoleErrorSpy).not.toHaveBeenCalledWith(expect.stringContaining('servo_snapshot_failed'));
   });
 });
 
@@ -476,8 +522,7 @@ describe('restore behaviour', () => {
     scriptRuntime({
       summary: { url: 'https://public.example/page', title: 'Restored', text: 'hi' },
       resumeState: [
-        { pageResultValue: { Ok: { String: '{"restored":true,"hasStorage":true,"hasCookies":false}' } } },
-        { pageResultValue: 'not-json' },
+        { pageResultValue: { Ok: { String: '{"restored":true,"hasStorage":false,"hasCookies":false,"hasIndexedDBState":false}' } } },
       ],
     });
     const session = await newSession();
@@ -496,7 +541,6 @@ describe('restore behaviour', () => {
   it('restores inline documents from the stored HTML asset without reloading', async () => {
     scriptRuntime({
       summary: { url: 'https://servo-inline.invalid/doc', title: 'Inline', text: '' },
-      resumeState: [{ pageResultValue: { Ok: { String: 'plain-text-result' } } }],
     });
     const session = await newSession();
     seedActiveRow(sql(), Date.now() + 60_000);
@@ -556,13 +600,11 @@ describe('restore behaviour', () => {
 
   it('aborts when the saved state cannot be reapplied after reload', async () => {
     // Step order follows the interleaving of evaluatePage/pageResult calls:
-    //   [0] evaluatePage -> apply succeeds
-    //   [1] pageResult   -> reports storage was restored, triggering a reload
-    //   [2] evaluatePage -> reapply fails after the reload
+    // The first state application reports saved data and triggers a reload;
+    // the second application is configured to fail.
     scriptRuntime({
       resumeState: [
-        { evaluatePageReturns: true },
-        { pageResultValue: { Ok: { String: '{"hasStorage":true}' } } },
+        { pageResultValue: { Ok: { String: '{"restored":true,"hasStorage":true}' } } },
         { evaluatePageReturns: false },
       ],
     });
@@ -573,14 +615,12 @@ describe('restore behaviour', () => {
   });
 
   it('completes reload restores that successfully reapply the saved state', async () => {
-    // Steps: apply -> pageResult (storage present, triggers reload) -> reapply
-    // -> pageResult consumed and discarded by restoreRuntime.
+    // The first state application reports stored data and the second one
+    // confirms that the data was reapplied after reload.
     scriptRuntime({
       summary: { url: 'https://public.example/page', title: 'Restored', text: '' },
       resumeState: [
-        { evaluatePageReturns: true },
-        { pageResultValue: { Ok: { String: '{"hasStorage":true}' } } },
-        { evaluatePageReturns: true },
+        { pageResultValue: { Ok: { String: '{"restored":true,"hasStorage":true}' } } },
         { pageResultValue: { Ok: { String: '{"restored":true,"hasStorage":true}' } } },
       ],
     });
@@ -921,6 +961,17 @@ describe('session termination', () => {
     await vi.advanceTimersByTimeAsync(90_000);
     expect((await session.getStatus()).runtimeAvailable).toBe(false);
     expect(consoleErrorSpy).not.toHaveBeenCalledWith(expect.stringContaining('servo_runtime_discard_failed'));
+  });
+
+  it('restores the full cookie jar after the WASM runtime is discarded', async () => {
+    scriptRuntime({});
+    const session = await newSession();
+    await session.initialize(initOptions());
+    expect(createdRuntimes[0].calls).toContain('exportCookieState');
+    await vi.advanceTimersByTimeAsync(90_000);
+    await session.inspect();
+    expect(createdRuntimes).toHaveLength(2);
+    expect(createdRuntimes[1].restoredCookies).toEqual([new Uint8Array([1, 2, 3])]);
   });
 
   it('logs failures that occur while discarding the idle runtime', async () => {

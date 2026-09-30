@@ -55,8 +55,14 @@ export class FakeServoRuntime {
   readonly calls: string[] = [];
   readonly evaluations: FakeEvalCall[] = [];
   readonly fonts: Uint8Array[] = [];
+  readonly restoredCookies: Uint8Array[] = [];
   trapped: boolean;
   private evaluatePageCount = 0;
+  private capturedStorage: Record<string, [string, string][]> = {
+    localStorage: [],
+    sessionStorage: [],
+  };
+  private storageCaptures = new Map<string, [string, string][]>();
 
   constructor(private readonly options: FakeRuntimeOptions = {}) {
     this.trapped = options.trapped ?? false;
@@ -111,6 +117,23 @@ export class FakeServoRuntime {
   evaluate(script: string, _opts?: { maxDurationMs?: number }): Promise<unknown> {
     this.calls.push('evaluate');
     const scripted = this.scriptedEvaluation(script);
+    if (script.includes('const nodePath=')) {
+      const payload = scripted.hit ? scripted.value : validResumeStateValue;
+      let resumeState: unknown = payload;
+      if (payload && typeof payload === 'object' && 'Ok' in payload) {
+        const raw = (payload as { Ok?: { String?: unknown } }).Ok?.String;
+        if (typeof raw === 'string') {
+          try { resumeState = JSON.parse(raw); } catch { /* leave malformed state for the caller to report */ }
+        }
+      }
+      if (resumeState && typeof resumeState === 'object') {
+        const state = resumeState as { localStorage?: [string, string][]; sessionStorage?: [string, string][] };
+        this.capturedStorage = {
+          localStorage: state.localStorage ?? [],
+          sessionStorage: state.sessionStorage ?? [],
+        };
+      }
+    }
     if (scripted.hit) {
       this.evaluations.push({ script, result: scripted.value });
       return Promise.resolve(scripted.value);
@@ -121,10 +144,63 @@ export class FakeServoRuntime {
       return Promise.resolve(value);
     }
     if (this.options.evaluateThrows) return Promise.reject(this.options.evaluateThrows);
-    if (script.startsWith('JSON.stringify((()=>')) {
+    if (script.includes('const nodePath=')) {
       // Default scripted restore state so captureSnapshot succeeds unless the
       // test explicitly scripts that expression via `evaluations`.
       const value: unknown = validResumeStateValue;
+      this.evaluations.push({ script, result: value });
+      return Promise.resolve(value);
+    }
+    if (script.includes("location.origin==='null'") && script.includes('const store=globalThis[')) {
+      const storageName = script.match(/const store=globalThis\[("localStorage"|"sessionStorage")\]/)?.[1];
+      const temporaryName = script.match(/globalThis\[("__servoMcpStorageCapture_[^"]+")\]=entries/)?.[1];
+      if (!storageName || !temporaryName) return Promise.resolve(null);
+      const entries = this.capturedStorage[JSON.parse(storageName)] ?? [];
+      this.storageCaptures.set(JSON.parse(temporaryName), entries);
+      const value = { Ok: { String: JSON.stringify({ count: entries.length }) } };
+      this.evaluations.push({ script, result: value });
+      return Promise.resolve(value);
+    }
+    if (script.includes('const entry=globalThis[')) {
+      const temporaryName = script.match(/const entry=globalThis\[("__servoMcpStorageCapture_[^"]+")\]/)?.[1];
+      const index = Number(script.match(/\?\.\[(\d+)\]/)?.[1]);
+      const offset = Number(script.match(/\.slice\((\d+),/)?.[1]);
+      const entry = temporaryName === undefined ? undefined : this.storageCaptures.get(JSON.parse(temporaryName))?.[index];
+      if (!entry) return Promise.resolve(null);
+      const value = {
+        keyLength: entry[0].length,
+        valueLength: entry[1].length,
+        key: entry[0].slice(offset, offset + 32_768),
+        value: entry[1].slice(offset, offset + 32_768),
+      };
+      const result = { Ok: { String: JSON.stringify(value) } };
+      this.evaluations.push({ script, result });
+      return Promise.resolve(result);
+    }
+    if (script.startsWith('delete globalThis[')) {
+      const temporaryName = script.match(/delete globalThis\[("__servoMcpStorageCapture_[^"]+")\]/)?.[1];
+      if (temporaryName) this.storageCaptures.delete(JSON.parse(temporaryName));
+      this.evaluations.push({ script, result: null });
+      return Promise.resolve(null);
+    }
+    if (script.startsWith('(async()=>{')) {
+      const step = this.resumeStep();
+      this.calls.push('evaluatePage');
+      this.calls.push('pageResult');
+      let value = step.evaluatePageReturns === false
+        ? { Err: 'could not apply the saved tab state' }
+        : step.pageResultValue ?? this.options.pageResultValue ?? { Ok: { String: '{"restored":true,"hasStorage":false,"hasCookies":false,"hasIndexedDBState":false,"indexedDatabases":0}' } };
+      if (value && typeof value === 'object' && 'Ok' in value) {
+        const raw = (value as { Ok?: { String?: unknown } }).Ok?.String;
+        if (typeof raw === 'string') {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object' && !('restored' in parsed)) {
+              value = { Ok: { String: JSON.stringify({ restored: true, ...parsed }) } };
+            }
+          } catch { /* preserve scripted malformed JSON for error-path tests */ }
+        }
+      }
       this.evaluations.push({ script, result: value });
       return Promise.resolve(value);
     }
@@ -209,6 +285,16 @@ export class FakeServoRuntime {
     this.calls.push('registerFont');
     this.fonts.push(bytes);
     return this.options.registerFontFaces ?? 1;
+  }
+
+  exportCookieState(): Uint8Array {
+    this.calls.push('exportCookieState');
+    return new Uint8Array([1, 2, 3]);
+  }
+
+  restoreCookieState(bytes: Uint8Array): void {
+    this.calls.push('restoreCookieState');
+    this.restoredCookies.push(bytes);
   }
 
   reset(): void {
