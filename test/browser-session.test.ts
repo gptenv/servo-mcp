@@ -406,8 +406,9 @@ describe('initialize', () => {
     const captureScript = createdRuntimes.at(-1)!.evaluations.find((call: { script: string }) => call.script.includes('const nodePath='))?.script;
     expect(captureScript).toMatch(/^\(async\(\)=>\{/);
     expect(captureScript).toMatch(/\}\)\(\)$/);
-    expect(captureScript).toContain('store.getAllKeys()');
-    expect(captureScript).toContain('store.getAll()');
+    expect(captureScript).toContain('store.openCursor()');
+    expect(captureScript).not.toContain('store.getAllKeys()');
+    expect(captureScript).not.toContain('store.getAll()');
     const header = JSON.parse(sql().table('browser_snapshot')!.rows[0].snapshot_json as string) as {
       version: number;
       originAssets: Record<string, string>;
@@ -716,6 +717,17 @@ describe('operate lifecycle', () => {
   it('refuses navigating to private addresses', async () => {
     const session = await activeSession();
     await expect(session.navigate('http://10.0.0.5/')).rejects.toThrow(TypeError);
+  });
+
+  it('loads inline HTML into an existing tab and persists its replacement source', async () => {
+    const session = await activeSession({ summary: { url: 'https://servo-inline.invalid/' } });
+    const result = await session.navigateHtml('<p>Replacement</p>', 100);
+    expect(result.action).toBe('navigate');
+    expect(lastRuntimeCalls()).toContain('loadHtml:<p>Replacement</p>');
+    expect(sql().table('browser_asset')!.rows.some((row) => row.name === 'initial-html' && row.chunk_text === '<p>Replacement</p>')).toBe(true);
+    await expect(session.navigateHtml('é'.repeat(524289))).rejects.toThrow(/UTF-8 bytes/);
+    createdRuntimes.at(-1).options.loadHtmlReturns = false;
+    await expect(session.navigateHtml('<p>Rejected</p>', 100)).rejects.toThrow(/rejected the supplied HTML/);
   });
 
   it('reports when Servo rejects a navigate request', async () => {

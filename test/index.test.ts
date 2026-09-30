@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const harness = vi.hoisted(() => ({
@@ -48,6 +49,7 @@ function makeSession(): Session {
     initialize: vi.fn(async (options: unknown) => ({ status: 'active', options })),
     getStatus: vi.fn(async () => ({ status: 'active' })),
     close: vi.fn(async () => ({ status: 'closed' })),
+    navigateHtml: vi.fn(async (html: string) => ({ action: 'navigate', page: { url: 'https://servo-inline.invalid/', title: 'Inline', text: html } })),
     navigate: vi.fn(async (url: string) => ({ action: 'navigate', page: { url, title: 'Example', text: 'visible page text' } })),
     inspect: vi.fn(async () => ({ url: 'https://example.com/', title: 'Example', text: 'body' })),
     evaluate: vi.fn(async (script: string) => ({ action: 'evaluate', page: { script } })),
@@ -85,6 +87,12 @@ function registeredTool(name: string) {
   const tool = harness.tools.get(name);
   if (!tool) throw new Error(`Missing registered tool: ${name}`);
   return tool;
+}
+
+function browserInput(groups: Array<Record<string, unknown>>) {
+  return {
+    actions: groups.map(({ sessionId, ...action }) => ({ ...(sessionId ? { sessionID: sessionId } : {}), ...action })),
+  };
 }
 
 async function invoke(name: string, input: unknown): Promise<any> {
@@ -126,7 +134,7 @@ describe('MCP Worker routes and server registration', () => {
     expect(harness.handlerOptions).toEqual([{ route: '/mcp' }]);
     expect(harness.servers).toHaveLength(1);
     expect([...harness.tools.keys()]).toEqual([
-      'servo_session_create', 'servo_session_status', 'servo_session_close', 'servo_navigate',
+      'servo_session_status', 'servo_navigate',
       'servo_inspect', 'servo_http_request', 'servo_http_get', 'servo_http_post', 'servo_http_put',
       'servo_http_patch', 'servo_http_delete', 'servo_http_head', 'servo_http_options',
       'servo_evaluate', 'servo_click', 'servo_type_text', 'servo_press_key',
@@ -151,53 +159,64 @@ describe('session management tools', () => {
     await worker.fetch(new Request('https://worker.example/mcp'), env, {} as ExecutionContext);
   });
 
-  it('creates URL and inline HTML sessions with defaults and per-session failures', async () => {
-    const create = registeredTool('servo_session_create');
-    const parsed = create.definition.inputSchema.parse({ sessions: [{ url: 'https://example.com/' }, { html: '<p>Hi</p>' }] });
-    expect(parsed.sessions[0]).toMatchObject({ width: 1280, height: 720, maxDurationMs: 10_000 });
-    const result = await create.handler(parsed);
-    const results = structured(result).results;
-    expect(results).toHaveLength(2);
-    expect(results.every((entry: any) => entry.ok)).toBe(true);
+  it('loads new URL and inline tabs as part of navigation without a standalone creation tool', async () => {
+    expect(harness.tools.has('servo_session_create')).toBe(false);
+    expect(harness.tools.has('servo_session_close')).toBe(false);
+    const result = structured(await invoke('servo_navigate', browserInput([
+      { url: 'https://example.com/', width: 800, height: 600 }, { html: '<p>Hi</p>' },
+    ])));
+    expect(result.responses).toHaveLength(2);
+    expect(result.responses.every((entry: any) => entry.ok)).toBe(true);
+    expect(result.responses[0].sessionID).not.toBe(result.responses[1].sessionID);
+    expect(defaultSession.initialize).toHaveBeenNthCalledWith(1, {
+      sessionId: result.responses[0].sessionID, width: 800, height: 600,
+      url: 'https://example.com/', html: undefined, maxDurationMs: 10_000,
+    });
+    expect(defaultSession.initialize).toHaveBeenNthCalledWith(2, {
+      sessionId: result.responses[1].sessionID, width: 1280, height: 720,
+      url: undefined, html: '<p>Hi</p>', maxDurationMs: 10_000,
+    });
+    expect(defaultSession.navigate).not.toHaveBeenCalled();
+    expect(defaultSession.inspect).toHaveBeenCalledTimes(2);
+
+    for (const input of [{ url: 'http://127.0.0.1/' }, { url: 'https://example.com/', html: '<p/>' }, {}, { html: 'é'.repeat(524289) }]) {
+      expect(structured(await invoke('servo_navigate', browserInput([input]))).responses[0].ok).toBe(false);
+    }
     expect(defaultSession.initialize).toHaveBeenCalledTimes(2);
-    expect(result.content.filter((part: any) => part.type === 'image')).toHaveLength(0);
-    expect(result.structuredContent.results[0].result).not.toHaveProperty('png');
-
-    const unsafe = await invoke('servo_session_create', { sessions: [{ url: 'http://127.0.0.1/' }] });
-    expect(structured(unsafe).results[0]).toMatchObject({ ok: false, error: expect.stringMatching(/Private, local/) });
-    const conflicting = await invoke('servo_session_create', { sessions: [{ url: 'https://example.com/', html: '<p/>' }] });
-    expect(structured(conflicting).results[0]).toMatchObject({ ok: false, error: expect.stringMatching(/Provide a URL or inline HTML/) });
-
     defaultSession.initialize.mockRejectedValueOnce(new Error('init failed'));
-    const failed = await invoke('servo_session_create', { sessions: [{ html: '<p/>' }] });
-    expect(structured(failed).results[0]).toMatchObject({ ok: false, error: 'init failed' });
+    expect(structured(await invoke('servo_navigate', browserInput([{ html: '<p/>' }]))).responses[0])
+      .toMatchObject({ actionIndex: 0, ok: false, error: 'init failed', sessionID: expect.any(String) });
     defaultSession.initialize.mockRejectedValueOnce('opaque failure');
-    const opaque = await invoke('servo_session_create', { sessions: [{ html: '<p/>' }] });
-    expect(structured(opaque).results[0]).toMatchObject({ ok: false, error: 'Servo request failed.' });
+    expect(structured(await invoke('servo_navigate', browserInput([{ html: '<p/>' }]))).responses[0])
+      .toMatchObject({ ok: false, error: 'Servo request failed.' });
+  });
+
+  it('returns errors for unknown IDs in status and close without initializing', async () => {
+    defaultSession.getStatus.mockResolvedValue({ status: 'missing' });
+    for (const tool of ['servo_session_status']) {
+      const response = structured(await invoke(tool, { actions: [{ sessionID: sessionId }] }));
+      expect(response.responses[0]).toMatchObject({ actionIndex: 0, sessionID: sessionId, ok: false, error: expect.stringMatching(/does not exist/) });
+    }
+    expect(defaultSession.initialize).not.toHaveBeenCalled();
+    expect(defaultSession.close).not.toHaveBeenCalled();
   });
 
   it('checks and closes multiple sessions with isolated failures', async () => {
     const ids = [sessionId, '00000000-0000-4000-8000-000000000002'];
     const second = makeSession();
     sessions.set(ids[1], second);
-    expect(structured(await invoke('servo_session_status', { sessionIds: ids })).results).toMatchObject([
-      { sessionId: ids[0], ok: true, result: { status: 'active' } },
-      { sessionId: ids[1], ok: true, result: { status: 'active' } },
+    expect(structured(await invoke('servo_session_status', { actions: ids.map((sessionID) => ({ sessionID })) })).responses).toMatchObject([
+      { actionIndex: 0, sessionID: ids[0], ok: true, response: { status: 'active' } },
+      { actionIndex: 1, sessionID: ids[1], ok: true, response: { status: 'active' } },
     ]);
     second.getStatus.mockRejectedValueOnce(new Error('status failed'));
-    const status = structured(await invoke('servo_session_status', { sessionIds: ids }));
-    expect(status.results[1]).toMatchObject({ ok: false, error: 'status failed' });
+    const status = structured(await invoke('servo_session_status', { actions: ids.map((sessionID) => ({ sessionID })) }));
+    expect(status.responses[1]).toMatchObject({ ok: false, error: 'status failed' });
     second.getStatus.mockRejectedValueOnce('opaque status failure');
-    expect(structured(await invoke('servo_session_status', { sessionIds: ids })).results[1].error).toBe('Servo request failed.');
+    expect(structured(await invoke('servo_session_status', { actions: ids.map((sessionID) => ({ sessionID })) })).responses[1].error).toBe('Servo request failed.');
 
-    second.close.mockRejectedValueOnce(new Error('close failed'));
-    const closed = structured(await invoke('servo_session_close', { sessionIds: ids }));
-    expect(closed.results[0]).toMatchObject({ ok: true, result: { status: 'closed' } });
-    expect(closed.results[1]).toMatchObject({ ok: false, error: 'close failed' });
-    second.close.mockRejectedValueOnce('opaque close failure');
-    expect(structured(await invoke('servo_session_close', { sessionIds: [ids[1]] })).results[0].error).toBe('Servo request failed.');
-    expect(() => registeredTool('servo_session_status').definition.inputSchema.parse({ sessionIds: [sessionId, sessionId] })).toThrow(/only once/);
-    expect(() => registeredTool('servo_session_close').definition.inputSchema.parse({ sessionIds: [] })).toThrow();
+    expect((await invoke('servo_session_status', { actions: [{ sessionID: sessionId }, { sessionID: sessionId }] })).isError).toBe(true);
+    expect(() => registeredTool('servo_session_status').definition.inputSchema.parse({ actions: [] })).toThrow();
   });
 });
 
@@ -209,26 +228,26 @@ describe('focused browser tools', () => {
 
   it('routes every focused operation with its own arguments and defaults', async () => {
     const cases: Array<[string, unknown, string]> = [
-      ['servo_navigate', { sessions: [{ sessionId, url: 'https://example.com/' }] }, 'navigate'],
-      ['servo_inspect', { sessions: [{ sessionId }] }, 'inspect'],
-      ['servo_evaluate', { sessions: [{ sessionId, script: '1 + 1' }] }, 'evaluate'],
-      ['servo_click', { sessions: [{ sessionId, x: 3, y: 4 }] }, 'click'],
-      ['servo_type_text', { sessions: [{ sessionId, text: 'text' }] }, 'typeText'],
-      ['servo_press_key', { sessions: [{ sessionId, key: 'Enter' }] }, 'pressKey'],
-      ['servo_scroll', { sessions: [{ sessionId, deltaX: 1, deltaY: 2 }] }, 'scroll'],
-      ['servo_history', { sessions: [{ sessionId, direction: 'back' }] }, 'history'],
-      ['servo_reload', { sessions: [{ sessionId }] }, 'reload'],
-      ['servo_wait', { sessions: [{ sessionId }] }, 'wait'],
-      ['servo_register_font', { sessions: [{ sessionId, fontBase64: 'Zm9udA==' }] }, 'registerFont'],
-      ['servo_get_capabilities', { sessions: [{ sessionId }] }, 'capabilities'],
+      ['servo_navigate', browserInput([{ sessionId, url: 'https://example.com/' }]), 'navigate'],
+      ['servo_inspect', browserInput([{ sessionId }]), 'inspect'],
+      ['servo_evaluate', browserInput([{ sessionId, script: '1 + 1' }]), 'evaluate'],
+      ['servo_click', browserInput([{ sessionId, x: 3, y: 4 }]), 'click'],
+      ['servo_type_text', browserInput([{ sessionId, text: 'text' }]), 'typeText'],
+      ['servo_press_key', browserInput([{ sessionId, key: 'Enter' }]), 'pressKey'],
+      ['servo_scroll', browserInput([{ sessionId, deltaX: 1, deltaY: 2 }]), 'scroll'],
+      ['servo_history', browserInput([{ sessionId, direction: 'back' }]), 'history'],
+      ['servo_reload', browserInput([{ sessionId }]), 'reload'],
+      ['servo_wait', browserInput([{ sessionId }]), 'wait'],
+      ['servo_register_font', browserInput([{ sessionId, fontBase64: 'Zm9udA==' }]), 'registerFont'],
+      ['servo_get_capabilities', browserInput([{ sessionId }]), 'capabilities'],
     ];
     for (const [name, input, method] of cases) {
       const result = structured(await invoke(name, input));
-      expect(result.results[0]).toMatchObject({ sessionId, ok: true });
+      expect(result.responses[0]).toMatchObject({ sessionID: sessionId, ok: true });
       expect((defaultSession[method] as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
     }
-    const browsed = structured(await invoke('servo_navigate', { sessions: [{ sessionId, url: 'https://example.com/' }] }));
-    expect(browsed.results[0].result.results[0]).toEqual({
+    const browsed = structured(await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/' }])));
+    expect(browsed.responses[0].response.results[0]).toEqual({
       title: 'Example', url: 'https://example.com/', snippet: 'visible page text', content: 'visible page text',
     });
     expect(defaultSession.navigate).toHaveBeenCalledWith('https://example.com/', 10_000);
@@ -238,20 +257,126 @@ describe('focused browser tools', () => {
     expect(defaultSession.registerFont).toHaveBeenCalledWith('Zm9udA==');
   });
 
+  it('accepts mixed existing and omitted IDs for every browser-action array', async () => {
+    const recordingId = '00000000-0000-4000-8000-000000000003';
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ['servo_navigate', { url: 'https://example.com/' }, 'inspect'],
+      ['servo_session_status', {}, 'getStatus'], ['servo_inspect', {}, 'inspect'], ['servo_evaluate', { script: '1' }, 'evaluate'],
+      ['servo_click', { x: 1, y: 2 }, 'click'], ['servo_type_text', { text: 'x' }, 'typeText'],
+      ['servo_press_key', { key: 'Enter' }, 'pressKey'], ['servo_scroll', { deltaX: 0, deltaY: 1 }, 'scroll'],
+      ['servo_history', { direction: 'back' }, 'history'], ['servo_reload', {}, 'reload'],
+      ['servo_wait', {}, 'wait'], ['servo_screenshot', {}, 'screenshot'],
+      ['servo_register_font', { fontBase64: 'Zm9udA==' }, 'registerFont'], ['servo_get_capabilities', {}, 'capabilities'],
+      ['servo_recording_start', {}, 'startScreenRecording'], ['servo_recording_stop', { recordingId }, 'stopScreenRecording'],
+      ['servo_recording_status', { recordingId }, 'getScreenRecordingStatus'],
+      ['servo_recording_download', { recordingId }, 'getScreenRecordingDownloadInfo'],
+    ];
+    for (const [tool, args, method] of cases) {
+      defaultSession.initialize.mockClear();
+      defaultSession[method].mockClear();
+      const response = structured(await invoke(tool, browserInput([{ sessionId, ...args }, args, args])));
+      expect(response.responses).toHaveLength(3);
+      expect(response.responses.every((entry: any) => entry.ok)).toBe(true);
+      expect(response.responses[0].sessionID).toBe(sessionId);
+      expect(new Set(response.responses.map((entry: any) => entry.sessionID)).size).toBe(3);
+      expect(defaultSession.initialize).toHaveBeenCalledTimes(2);
+      expect(defaultSession[method]).toHaveBeenCalledTimes(tool === 'servo_navigate' ? 2 : tool === 'servo_session_status' ? 4 : 3);
+      if (tool === 'servo_recording_download') {
+        expect(response.responses[1].response.downloadUrl).toContain(`/recordings/${response.responses[1].sessionID}/`);
+      }
+    }
+  });
+
+  it('never initializes supplied IDs and rejects unknown IDs across every browser tool', async () => {
+    defaultSession.getStatus.mockResolvedValue({ status: 'missing' });
+    for (const [name, tool] of harness.tools) {
+      if (name.startsWith('servo_http_')) continue;
+      const inputs: Record<string, unknown> = {
+        sessionID: sessionId, url: 'https://example.com/', script: '1', x: 1, y: 2, text: 'x', key: 'Enter',
+        deltaX: 0, deltaY: 1, direction: 'back', fontBase64: 'Zm9udA==',
+        recordingId: '00000000-0000-4000-8000-000000000003',
+      };
+      const allowed = tool.definition.inputSchema.shape.actions.element.shape;
+      const action = Object.fromEntries(Object.entries(inputs).filter(([key]) => key in allowed));
+      const response = structured(await invoke(name, { actions: [action] }));
+      expect(response.responses[0]).toMatchObject({ actionIndex: 0, sessionID: sessionId, ok: false, error: expect.stringMatching(/does not exist/) });
+    }
+    expect(defaultSession.initialize).not.toHaveBeenCalled();
+    expect(defaultSession.inspect).not.toHaveBeenCalled();
+    expect(defaultSession.screenshot).not.toHaveBeenCalled();
+  });
+
+  it('accepts every JSON falsy ID, omission, and undefined without conflating truthy unknown IDs', async () => {
+    for (const input of [
+      { actions: [{ sessionID: null }, { sessionID: false }, { sessionID: 0 }, { sessionID: '' }, {}] },
+      { actions: [{}, {}] },
+      ...[null, false, 0, ''].map((sessionID) => ({ actions: [{ sessionID }] })),
+    ]) {
+      const result = structured(await invoke('servo_inspect', input));
+      expect(result.responses.every((entry: any) => entry.ok)).toBe(true);
+      expect(result.metadata).toEqual({ responseCount: result.responses.length, successfulCount: result.responses.length, failedCount: 0 });
+      expect(new Set(result.responses.map((entry: any) => entry.sessionID)).size).toBe(input.actions.length);
+    }
+    expect(defaultSession.initialize).toHaveBeenCalledTimes(11);
+    defaultSession.getStatus.mockResolvedValue({ status: 'missing' });
+    const response = await invoke('servo_inspect', { actions: [{ sessionID: sessionId }, { sessionID: false }] });
+    expect(response.isError).toBe(true);
+    expect(structured(response).responses[0]).toMatchObject({ sessionID: sessionId, ok: false, code: 'SESSION_NOT_FOUND', status: 404 });
+    expect(structured(response).responses[1].ok).toBe(true);
+    expect(defaultSession.initialize).toHaveBeenCalledTimes(12);
+    expect(() => registeredTool('servo_inspect').definition.inputSchema.parse({ actions: [{ sessionID: '00000000-0000-4000-8000-000000000099' }] })).not.toThrow();
+  });
+
+  it('exports the new arrays in every session tool JSON schema and rejects obsolete selectors', () => {
+    for (const [name, tool] of harness.tools) {
+      const schema = z.toJSONSchema(tool.definition.inputSchema, { io: 'input' }) as any;
+      expect(schema.properties).toHaveProperty('actions');
+      expect(schema.properties).not.toHaveProperty('sessionIDs');
+      if (!name.startsWith('servo_http_')) expect(schema.properties.actions.items.properties).toHaveProperty('sessionID');
+      expect(schema.properties).not.toHaveProperty('sessions');
+      expect(schema.required).toContain('actions');
+    }
+    const schema = registeredTool('servo_inspect').definition.inputSchema;
+    expect(() => schema.parse({ sessionIDs: [sessionId], actions: [{}] })).toThrow();
+    expect(() => schema.parse({ actions: [{ sessionId }] })).toThrow();
+  });
+
+  it('validates corresponding array lengths before allocating resources', async () => {
+    const tool = registeredTool('servo_inspect');
+    expect(() => tool.definition.inputSchema.parse({ actions: [{}, {}], sessionIDs: [null] })).toThrow();
+    // The MCP framework validates inputs before invoking a tool handler.
+    // Direct handler calls bypass that validation, so assert the schema boundary.
+    expect(defaultSession.initialize).not.toHaveBeenCalled();
+    for (const name of ['servo_inspect', 'servo_screenshot']) {
+      expect(() => registeredTool(name).definition.inputSchema.parse({ actions: [] })).toThrow();
+    }
+  });
+
+  it('uses resumable IDs and rejects viewport changes on existing tabs', async () => {
+    defaultSession.getStatus.mockResolvedValue({ status: 'active', runtimeAvailable: false, resumable: true });
+    expect(structured(await invoke('servo_inspect', browserInput([{ sessionId }]))).responses[0].ok).toBe(true);
+    expect(defaultSession.initialize).not.toHaveBeenCalled();
+    expect(defaultSession.inspect).toHaveBeenCalledOnce();
+    expect(structured(await invoke('servo_inspect', browserInput([{ sessionId, width: 800 }]))).responses[0].error)
+      .toMatch(/Initial viewport/);
+    expect(structured(await invoke('servo_navigate', browserInput([{ sessionId, html: '<p>Updated</p>' }]))).responses[0].ok).toBe(true);
+    expect(defaultSession.navigateHtml).toHaveBeenCalledWith('<p>Updated</p>', 10_000);
+  });
+
   it('routes recording start, stop, status, and download tools', async () => {
     const recordingId = '00000000-0000-4000-8000-000000000003';
-    const started = structured(await invoke('servo_recording_start', { sessions: [{ sessionId, fps: 3, maxDurationSeconds: 12 }] }));
-    expect(started.results[0]).toMatchObject({ ok: true, result: { recordingId, status: 'recording' } });
+    const started = structured(await invoke('servo_recording_start', browserInput([{ sessionId, fps: 3, maxDurationSeconds: 12 }])));
+    expect(started.responses[0]).toMatchObject({ ok: true, response: { recordingId, status: 'recording' } });
     expect(defaultSession.startScreenRecording).toHaveBeenCalledWith(3, 12);
 
-    const stopped = structured(await invoke('servo_recording_stop', { sessions: [{ sessionId, recordingId }] }));
-    expect(stopped.results[0]).toMatchObject({ ok: true, result: { status: 'encoding' } });
+    const stopped = structured(await invoke('servo_recording_stop', browserInput([{ sessionId, recordingId }])));
+    expect(stopped.responses[0]).toMatchObject({ ok: true, response: { status: 'encoding' } });
     expect(defaultSession.stopScreenRecording).toHaveBeenCalledWith(recordingId);
 
-    expect(structured(await invoke('servo_recording_status', { sessions: [{ sessionId, recordingId }] })).results[0])
-      .toMatchObject({ ok: true, result: { status: 'ready' } });
-    const download = structured(await invoke('servo_recording_download', { sessions: [{ sessionId, recordingId }] }));
-    expect(download.results[0].result).toMatchObject({
+    expect(structured(await invoke('servo_recording_status', browserInput([{ sessionId, recordingId }]))).responses[0])
+      .toMatchObject({ ok: true, response: { status: 'ready' } });
+    const download = structured(await invoke('servo_recording_download', browserInput([{ sessionId, recordingId }])));
+    expect(download.responses[0].response).toMatchObject({
       recordingId, status: 'ready', downloadUrl: `https://worker.example/recordings/${sessionId}/${recordingId}/token`,
       filename: `servo-recording-${recordingId}.mp4`, mimeType: 'video/mp4', sizeBytes: 42,
     });
@@ -262,15 +387,15 @@ describe('focused browser tools', () => {
     const second = makeSession();
     sessions.set(secondId, second);
     defaultSession.inspect.mockRejectedValueOnce(new Error('one tab failed'));
-    const response = structured(await invoke('servo_inspect', { sessions: [{ sessionId }, { sessionId: secondId }] }));
-    expect(response.results).toMatchObject([
-      { sessionId, ok: false, error: 'one tab failed' },
-      { sessionId: secondId, ok: true },
+    const response = structured(await invoke('servo_inspect', browserInput([{ sessionId }, { sessionId: secondId }])));
+    expect(response.responses).toMatchObject([
+      { actionIndex: 0, sessionID: sessionId, ok: false, error: 'one tab failed' },
+      { actionIndex: 1, sessionID: secondId, ok: true },
     ]);
     defaultSession.inspect.mockRejectedValueOnce('non-error rejection');
-    expect(structured(await invoke('servo_inspect', { sessions: [{ sessionId }] })).results[0].error).toBe('Servo request failed.');
-    expect(structured(await invoke('servo_navigate', { sessions: [{ sessionId, url: 'http://localhost/' }] })).results[0].error).toMatch(/Private, local/);
-    const duplicate = await invoke('servo_inspect', { sessions: [{ sessionId }, { sessionId }] });
+    expect(structured(await invoke('servo_inspect', browserInput([{ sessionId }]))).responses[0].error).toBe('Servo request failed.');
+    expect(structured(await invoke('servo_navigate', browserInput([{ sessionId, url: 'http://localhost/' }]))).responses[0].error).toMatch(/Private, local/);
+    const duplicate = await invoke('servo_inspect', browserInput([{ sessionId }, { sessionId }]));
     expect(duplicate.isError).toBe(true);
     expect(duplicate.content[0].text).toMatch(/only once/);
     const hostileGroups = new Proxy([] as unknown[], {
@@ -279,10 +404,10 @@ describe('focused browser tools', () => {
         return Reflect.get(target, property, receiver);
       },
     });
-    const rawError = await registeredTool('servo_inspect').handler({ sessions: hostileGroups });
+    const rawError = await registeredTool('servo_inspect').handler({ actions: hostileGroups });
     expect(rawError.isError).toBe(true);
     expect(rawError.content[0].text).toBe('Servo request failed.');
-    expect(() => registeredTool('servo_evaluate').definition.inputSchema.parse({ sessions: [{ sessionId, script: 'x'.repeat(65_537) }] })).toThrow();
+    expect(() => registeredTool('servo_evaluate').definition.inputSchema.parse(browserInput([{ sessionId, script: 'x'.repeat(65_537) }]))).toThrow();
   });
 
   it('maps successful screenshot bytes to image blocks and retains per-session errors', async () => {
@@ -300,18 +425,18 @@ describe('focused browser tools', () => {
     const fourth = makeSession();
     fourth.screenshot.mockRejectedValueOnce('opaque capture failure');
     sessions.set(fourthId, fourth);
-    const result = await invoke('servo_screenshot', { sessions: [{ sessionId }, { sessionId: otherId }, { sessionId: thirdId }, { sessionId: fourthId }] });
-    expect(result.structuredContent.results).toMatchObject([
-      { sessionId, ok: true, result: { imageIndex: 0 } },
-      { sessionId: otherId, ok: false, error: 'capture failed' },
-      { sessionId: thirdId, ok: true, result: { imageIndex: 1 } },
-      { sessionId: fourthId, ok: false, error: 'Servo request failed.' },
+    const result = await invoke('servo_screenshot', browserInput([{ sessionId }, { sessionId: otherId }, { sessionId: thirdId }, { sessionId: fourthId }]));
+    expect(result.structuredContent.responses).toMatchObject([
+      { actionIndex: 0, sessionID: sessionId, ok: true, response: { imageIndex: 0 } },
+      { actionIndex: 1, sessionID: otherId, ok: false, error: 'capture failed' },
+      { actionIndex: 2, sessionID: thirdId, ok: true, response: { imageIndex: 1 } },
+      { actionIndex: 3, sessionID: fourthId, ok: false, error: 'Servo request failed.' },
     ]);
     expect(result.structuredContent.images).toBeUndefined();
     expect(result.content[0].text).toContain('imageIndex');
     expect(result.content[1]).toMatchObject({ type: 'image', data: Buffer.from(largePng).toString('base64'), mimeType: 'image/png' });
     expect(result.content[2]).toMatchObject({ type: 'image', data: Buffer.from(png).toString('base64'), mimeType: 'image/png' });
-    const duplicate = await invoke('servo_screenshot', { sessions: [{ sessionId }, { sessionId }] });
+    const duplicate = await invoke('servo_screenshot', browserInput([{ sessionId }, { sessionId }]));
     expect(duplicate.isError).toBe(true);
     expect(duplicate.content[0].text).toMatch(/only once/);
   });
@@ -327,15 +452,37 @@ describe('focused browser tools', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const result = structured(await invoke('servo_http_request', {
+      const result = structured(await invoke('servo_http_request', { actions: [{
         url: 'https://example.com/api', method: 'POST', headers: { 'x-test': 'overridden' },
         body: '{"hello":"world"}',
-      }));
-      expect(result.request).toMatchObject({ method: 'POST', url: 'https://example.com/api' });
-      expect(result.response).toMatchObject({ status: 201, ok: true, contentType: 'text/html; charset=utf-8', headers: { 'x-origin': 'fixture' } });
-      expect(result.body).toContain('<title>Sample Page</title>');
-      expect(result.results).toEqual([{ title: 'Sample Page', url: 'https://example.com/api', snippet: 'Hello\nVisible & useful', content: 'Hello\nVisible & useful' }]);
+      }] }));
+      const requestResult = result.responses[0].response;
+      expect(requestResult.request).toMatchObject({ method: 'POST', url: 'https://example.com/api' });
+      expect(requestResult.response).toMatchObject({ status: 201, ok: true, contentType: 'text/html; charset=utf-8', headers: { 'x-origin': 'fixture' } });
+      expect(requestResult.body).toContain('<title>Sample Page</title>');
+      expect(requestResult.results).toEqual([{ title: 'Sample Page', url: 'https://example.com/api', snippet: 'Hello\nVisible & useful', content: 'Hello\nVisible & useful' }]);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('batches HTTP actions in order with isolated failures and no browser allocation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: URL) => new Response(url.pathname)));
+    try {
+      for (const [name, tool] of harness.tools) {
+        if (!name.startsWith('servo_http_')) continue;
+        const response = await invoke(name, { actions: [
+          { url: 'https://example.com/first' }, { url: 'http://127.0.0.1/private' }, { url: 'https://example.com/third' },
+        ] });
+        expect(response.isError).toBe(true);
+        expect(structured(response).responses).toMatchObject([
+          { actionIndex: 0, ok: true, response: { request: { url: 'https://example.com/first' } } },
+          { actionIndex: 1, ok: false, error: expect.stringMatching(/Private, local/) },
+          { actionIndex: 2, ok: true, response: { request: { url: 'https://example.com/third' } } },
+        ]);
+        expect(() => tool.definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
+      }
+      expect(env.BROWSER_SESSIONS.getByName).not.toHaveBeenCalled();
+      expect(() => registeredTool('servo_navigate').definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
     } finally { vi.unstubAllGlobals(); }
   });
 
@@ -345,21 +492,21 @@ describe('focused browser tools', () => {
       : new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/private' } }));
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const denied = await invoke('servo_http_get', { url: 'https://example.com/' });
+      const denied = await invoke('servo_http_get', { actions: [{ url: 'https://example.com/' }] });
       expect(denied.isError).toBe(true);
       expect(denied.content[0].text).toMatch(/Private, local/);
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
-      const options = await invoke('servo_http_options', { url: 'https://example.com/', headers: { 'x-check': 'yes' } });
-      expect(options.structuredContent.request.method).toBe('OPTIONS');
+      const options = await invoke('servo_http_options', { actions: [{ url: 'https://example.com/', headers: { 'x-check': 'yes' } }] });
+      expect(options.structuredContent.responses[0].response.request.method).toBe('OPTIONS');
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      const getWithBody = await invoke('servo_http_request', { url: 'https://example.com/', method: 'GET', body: 'invalid' });
+      const getWithBody = await invoke('servo_http_request', { actions: [{ url: 'https://example.com/', method: 'GET', body: 'invalid' }] });
       expect(getWithBody.isError).toBe(true);
       fetchMock.mockResolvedValueOnce(new Response(null, { status: 207 }));
-      const extension = await invoke('servo_http_request', { url: 'https://example.com/', method: 'PROPFIND' });
-      expect(extension.structuredContent.request.method).toBe('PROPFIND');
-      expect(extension.structuredContent.response.status).toBe(207);
-      const unsupported = await invoke('servo_http_request', { url: 'https://example.com/', method: 'CONNECT' });
+      const extension = await invoke('servo_http_request', { actions: [{ url: 'https://example.com/', method: 'PROPFIND' }] });
+      expect(extension.structuredContent.responses[0].response.request.method).toBe('PROPFIND');
+      expect(extension.structuredContent.responses[0].response.response.status).toBe(207);
+      const unsupported = await invoke('servo_http_request', { actions: [{ url: 'https://example.com/', method: 'CONNECT' }] });
       expect(unsupported.isError).toBe(true);
       expect(unsupported.content[0].text).toMatch(/forbidden by the Fetch API/);
     } finally { vi.unstubAllGlobals(); }

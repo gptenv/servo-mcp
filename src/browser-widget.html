@@ -22,7 +22,7 @@
     <label>Optional page script <textarea id="script" placeholder="document.title"></textarea></label>
     <button>Load and render</button>
   </form>
-  <p>Session: <code id="session-id">none</code> <button id="close-session" type="button" disabled>Close session</button></p>
+  <p>Session: <code id="session-id">none</code></p>
   <p id="status" role="status"></p>
   <img id="preview" alt="Screenshot rendered by Servo">
   <pre id="details"></pre>
@@ -66,44 +66,27 @@
     const status = document.querySelector('#status');
     status.textContent = 'Loading page…';
     try {
-      const created = await call('tools/call', { name: 'servo_session_create', arguments: {
-        sessions: [{ url: document.querySelector('#url').value }],
+      const created = await call('tools/call', { name: 'servo_navigate', arguments: {
+        actions: [{ sessionID: sessionId, url: document.querySelector('#url').value }],
       } });
-      if (created.isError) throw new Error(created.content?.[0]?.text || 'Servo could not start a session.');
-      const createdSession = created.structuredContent?.results?.[0];
-      if (!createdSession?.ok) throw new Error(createdSession?.error || 'Servo could not start a session.');
-      sessionId = createdSession.sessionId;
+      if (created.isError) throw new Error(created.content?.[0]?.text || 'Servo could not load the page.');
+      const createdSession = created.structuredContent?.responses?.[0];
+      if (!createdSession?.ok) throw new Error(createdSession?.error || 'Servo could not load the page.');
+      sessionId = createdSession.sessionID;
       document.querySelector('#session-id').textContent = sessionId || 'unavailable';
-      document.querySelector('#close-session').disabled = !sessionId;
       const script = document.querySelector('#script').value;
       if (script) {
-        const evaluated = await call('tools/call', { name: 'servo_evaluate', arguments: { sessions: [{ sessionId, script }] } });
+        const evaluated = await call('tools/call', { name: 'servo_evaluate', arguments: { actions: [{ sessionID: sessionId, script }] } });
         if (evaluated.isError) throw new Error(evaluated.content?.[0]?.text || 'Servo evaluation failed.');
-        const evaluationResult = evaluated.structuredContent?.results?.[0];
+        const evaluationResult = evaluated.structuredContent?.responses?.[0];
         if (!evaluationResult?.ok) throw new Error(evaluationResult?.error || 'Servo evaluation failed.');
       }
-      const rendered = await call('tools/call', { name: 'servo_screenshot', arguments: { sessions: [{ sessionId }] } });
+      const rendered = await call('tools/call', { name: 'servo_screenshot', arguments: { actions: [{ sessionID: sessionId }] } });
       if (rendered.isError) throw new Error(rendered.content?.[0]?.text || 'Servo could not render the page.');
-      const screenshotResult = rendered.structuredContent?.results?.[0];
+      const screenshotResult = rendered.structuredContent?.responses?.[0];
       if (!screenshotResult?.ok) throw new Error(screenshotResult?.error || 'Servo could not render the page.');
-      render(screenshotResult.result, rendered.content);
+      render(screenshotResult.response, rendered.content);
       status.textContent = 'Session ready';
-    } catch (error) {
-      status.textContent = String(error?.message ?? error);
-    }
-  });
-  document.querySelector('#close-session').addEventListener('click', async () => {
-    if (!sessionId) return;
-    const status = document.querySelector('#status');
-    try {
-      const closed = await call('tools/call', { name: 'servo_session_close', arguments: { sessionIds: [sessionId] } });
-      if (closed.isError) throw new Error(closed.content?.[0]?.text || 'Could not close Servo session.');
-      const closeResult = closed.structuredContent?.results?.[0];
-      if (!closeResult?.ok) throw new Error(closeResult?.error || 'Could not close Servo session.');
-      sessionId = null;
-      document.querySelector('#session-id').textContent = 'none';
-      document.querySelector('#close-session').disabled = true;
-      status.textContent = 'Session closed';
     } catch (error) {
       status.textContent = String(error?.message ?? error);
     }

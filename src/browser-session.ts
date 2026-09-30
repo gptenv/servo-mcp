@@ -25,7 +25,7 @@ const RECORDING_FRAME_WIDTH = 960;
 const RECORDING_FRAME_HEIGHT = 540;
 const RECORDING_JPEG_QUALITY = 70;
 const pageSummaryExpression = `JSON.stringify({url: location.href, title: document.title, text: (document.body?.innerText || '').slice(0, 20000)})`;
-const resumeStateExpression = `(async()=>{
+const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
   const nodePath=(node)=>{const path=[];for(let current=node;current&&current!==document.documentElement;current=current.parentElement){const parent=current.parentElement;if(!parent)return null;path.unshift(Array.prototype.indexOf.call(parent.children,current));}return path;};
   const fields=[];
   for(const element of Array.from(document.querySelectorAll('input,textarea,select,[contenteditable="true"]')).slice(0,200)){
@@ -60,16 +60,62 @@ const resumeStateExpression = `(async()=>{
     nodes[id]=node;return {r:id};
   };return {root:await encode(root),nodes};};
   const databases=[];
-  if(location.origin!=='null'&&typeof indexedDB!=='undefined'&&typeof indexedDB.databases==='function'){
+  if(${captureIndexedDB}&&location.origin!=='null'&&typeof indexedDB!=='undefined'&&typeof indexedDB.databases==='function'){
     let infos;try{infos=await indexedDB.databases();}catch(error){throw new Error('IndexedDB snapshot could not list databases: '+String(error));}
     for(const info of infos){if(typeof info.name!=='string')continue;let db;try{db=await new Promise((resolve,reject)=>{const request=indexedDB.open(info.name);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('IndexedDB database enumeration was blocked.'));});}catch(error){throw new Error('IndexedDB snapshot could not open '+info.name+': '+String(error));}
-      let stage='reading schema';try{const stores=[];const names=Array.from(db.objectStoreNames);if(names.length){const tx=db.transaction(names,'readonly');const pending=[];for(const name of names){stage='reading records from '+name;const store=tx.objectStore(name);const indexes=Array.from(store.indexNames,(indexName)=>{const index=store.index(indexName);return {name:index.name,keyPath:index.keyPath,unique:index.unique,multiEntry:index.multiEntry};});const storeData={name:store.name,keyPath:store.keyPath,autoIncrement:store.autoIncrement,indexes,records:[]};stores.push(storeData);pending.push(new Promise((resolve,reject)=>{let keys,values;const collect=()=>{if(keys===undefined||values===undefined)return;if(keys.length!==values.length){reject(new Error('IndexedDB returned mismatched record keys and values.'));return;}for(let index=0;index<keys.length;index++)storeData.records.push({primaryKey:keys[index],value:values[index]});resolve();};const keyRequest=store.getAllKeys();const valueRequest=store.getAll();keyRequest.onerror=()=>reject(keyRequest.error);valueRequest.onerror=()=>reject(valueRequest.error);keyRequest.onsuccess=()=>{keys=keyRequest.result;collect();};valueRequest.onsuccess=()=>{values=valueRequest.result;collect();};}));}await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('IndexedDB snapshot transaction aborted.'));});await Promise.all(pending);stage='serializing records';for(const store of stores){for(const record of store.records){record.primaryKey=await encodeGraph(record.primaryKey);record.value=await encodeGraph(record.value);}}}
+      let stage='reading schema';try{
+        const stores=[];const names=Array.from(db.objectStoreNames);
+        if(names.length){
+          const tx=db.transaction(names,'readonly');const pending=[];
+          for(const name of names){
+            stage='reading records from '+name;const store=tx.objectStore(name);
+            const indexes=Array.from(store.indexNames,(indexName)=>{const index=store.index(indexName);return {name:index.name,keyPath:index.keyPath,unique:index.unique,multiEntry:index.multiEntry};});
+            const storeData={name:store.name,keyPath:store.keyPath,autoIncrement:store.autoIncrement,indexes,records:[]};stores.push(storeData);
+            pending.push(new Promise((resolve,reject)=>{
+              const request=store.openCursor();
+              request.onerror=()=>reject(request.error);
+              request.onsuccess=()=>{const cursor=request.result;if(!cursor){resolve();return;}storeData.records.push({primaryKey:cursor.primaryKey,value:cursor.value});cursor.continue();};
+            }));
+          }
+          await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('IndexedDB snapshot transaction aborted.'));});
+          await Promise.all(pending);
+          stage='serializing records';
+          for(const store of stores){for(const record of store.records){record.primaryKey=await encodeGraph(record.primaryKey);record.value=await encodeGraph(record.value);}}
+        }
         databases.push({name:db.name,version:db.version,stores});
       }catch(error){throw new Error('IndexedDB snapshot failed while '+stage+' in '+info.name+': '+String(error));}finally{db.close();}
     }
   }
   return JSON.stringify({version:1,url:location.href,origin:location.origin,scrollX:scrollX||0,scrollY:scrollY||0,fields,localStorage:[],sessionStorage:[],cookies:'',indexedDB:databases});
 })()`;
+
+type StorageProbe = { localStorage: boolean; sessionStorage: boolean; indexedDB: boolean; fresh?: boolean };
+const ALL_STORAGE_PROBES: StorageProbe = { localStorage: true, sessionStorage: true, indexedDB: true };
+
+function storageProbeExpression(key: string, reset: boolean): string {
+  return `(function(){
+    const key=${JSON.stringify(key)};
+    let state=globalThis[key];
+    const fresh=!state;
+    if(fresh){state=Object.create(null);Object.defineProperty(globalThis,key,{value:state,configurable:false});}
+    let supported=true;
+    for(const name of ['localStorage','sessionStorage','indexedDB']){
+      let owner=globalThis;
+      while(owner&&!Object.getOwnPropertyDescriptor(owner,name))owner=Object.getPrototypeOf(owner);
+      const descriptor=owner&&Object.getOwnPropertyDescriptor(owner,name);
+      if(!descriptor||typeof descriptor.get!=='function'){supported=false;continue;}
+      if(state[name+'Getter']!==descriptor.get){
+        const original=descriptor.get;
+        const getter=function(){state[name]=(state[name]||0)+1;return Reflect.apply(original,this,[]);};
+        try{Object.defineProperty(owner,name,{...descriptor,get:getter});state[name+'Getter']=getter;}
+        catch{supported=false;}
+      }
+    }
+    const result={supported,fresh,localStorage:(state.localStorage||0)>0,sessionStorage:(state.sessionStorage||0)>0,indexedDB:(state.indexedDB||0)>0};
+    if(${reset})state.localStorage=state.sessionStorage=state.indexedDB=0;
+    return JSON.stringify(result);
+  })()`;
+}
 
 type ResumeField = { path: number[]; kind: 'checked' | 'selected' | 'html' | 'value'; value: boolean | boolean[] | string; selectionStart?: number | null; selectionEnd?: number | null };
 type ResumeSnapshot = {
@@ -208,6 +254,16 @@ async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
   return parsed as PageSummary;
 }
 
+async function pageUrl(runtime: ServoRuntime): Promise<string> {
+  try {
+    const value = parseEvaluationResult(await runtime.evaluate('location.href', { maxDurationMs: 2_000 }));
+    if (typeof value === 'string') return value;
+  } catch {
+    // Fall back to the complete summary for older runtime adapters.
+  }
+  return (await pageSummary(runtime)).url;
+}
+
 function parseJsonResult(runtime: ServoRuntime): unknown {
   const result = parseEvaluationResult(runtime.pageResult());
   if (typeof result === 'string') {
@@ -283,7 +339,10 @@ function snapshotForOrigin(snapshot: ResumeSnapshot, url: string): ResumeSnapsho
 
 export class ServoBrowserSession extends DurableObject<Env> {
   private runtime: ServoRuntime | undefined;
+  private cachedSessionRow: SessionRow | undefined;
+  private sessionRowLoaded = false;
   private queue: Promise<void> = Promise.resolve();
+  private readonly storageProbeKey = `__servoMcpStorageProbe_${crypto.randomUUID().replaceAll('-', '')}`;
   private recordingTimer: ReturnType<typeof setInterval> | undefined;
   private recordingCapturePending = false;
   // Host fetch failures (DNS, TLS, connection errors) during the current
@@ -362,6 +421,21 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
+  private async storageProbe(runtime: ServoRuntime, reset: boolean): Promise<StorageProbe | undefined> {
+    try {
+      const value = parseEvaluationResult(await runtime.evaluate(
+        storageProbeExpression(this.storageProbeKey, reset), { maxDurationMs: 2_000 },
+      ));
+      if (typeof value !== 'object' || value === null || !('supported' in value) || value.supported !== true
+        || !('localStorage' in value) || typeof value.localStorage !== 'boolean'
+        || !('sessionStorage' in value) || typeof value.sessionStorage !== 'boolean'
+        || !('indexedDB' in value) || typeof value.indexedDB !== 'boolean') return undefined;
+      return value as StorageProbe;
+    } catch {
+      return undefined;
+    }
+  }
+
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.queue.then(operation, operation);
     this.queue = result.then(() => undefined, () => undefined);
@@ -369,9 +443,12 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private row(): SessionRow | undefined {
-    return this.ctx.storage.sql.exec<SessionRow>(
+    if (this.sessionRowLoaded) return this.cachedSessionRow;
+    this.cachedSessionRow = this.ctx.storage.sql.exec<SessionRow>(
       'SELECT status, created_at, updated_at, expires_at, width, height FROM browser_session WHERE singleton = 1',
     ).toArray()[0];
+    this.sessionRowLoaded = this.cachedSessionRow !== undefined;
+    return this.cachedSessionRow;
   }
 
   private recording(id: string): RecordingRow | undefined {
@@ -541,10 +618,14 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private writeStatus(status: SessionStatus, expiresAt = Date.now()): void {
+    const updatedAt = Date.now();
     this.ctx.storage.sql.exec(
       'UPDATE browser_session SET status = ?, updated_at = ?, expires_at = ? WHERE singleton = 1',
-      status, Date.now(), expiresAt,
+      status, updatedAt, expiresAt,
     );
+    if (this.cachedSessionRow) {
+      this.cachedSessionRow = { ...this.cachedSessionRow, status, updated_at: updatedAt, expires_at: expiresAt };
+    }
   }
 
   private storeAsset(name: string, value: string, chunkChars = ASSET_CHUNK_CHARS): void {
@@ -686,16 +767,23 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return entries;
   }
 
-  private async captureSnapshot(runtime: ServoRuntime): Promise<void> {
+  private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
-    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression, { maxDurationMs: 15_000 }));
+    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB), { maxDurationMs: 15_000 }));
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error(`Servo returned invalid browser restore state: ${JSON.stringify(value).slice(0, 512)}`);
     }
     const snapshot = value as ResumeSnapshot;
     snapshot.cookieState = cookieState;
-    snapshot.localStorage = await this.captureWebStorage(runtime, 'localStorage');
-    snapshot.sessionStorage = await this.captureWebStorage(runtime, 'sessionStorage');
+    const resourcesTouched = resources.localStorage || resources.sessionStorage || resources.indexedDB;
+    const existingStorage = resourcesTouched ? this.loadSnapshot(snapshot.url) : undefined;
+    snapshot.localStorage = resources.localStorage
+      ? await this.captureWebStorage(runtime, 'localStorage')
+      : existingStorage?.localStorage ?? [];
+    snapshot.sessionStorage = resources.sessionStorage
+      ? await this.captureWebStorage(runtime, 'sessionStorage')
+      : existingStorage?.sessionStorage ?? [];
+    snapshot.indexedDB = resources.indexedDB ? snapshot.indexedDB ?? [] : existingStorage?.indexedDB ?? [];
     const origin = snapshot.origin ?? new URL(snapshot.url).origin;
     const previous = this.snapshotRecord();
     const originAssets: Record<string, string> = {};
@@ -730,15 +818,18 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (oldPointer.version === 2 && oldPointer.assetName) legacyAssetNames.push(oldPointer.assetName);
     }
 
-    const assetName = `origin:${crypto.randomUUID()}`;
-    const originState: OriginStorageSnapshot = {
-      localStorage: snapshot.localStorage,
-      sessionStorage: snapshot.sessionStorage,
-      indexedDB: snapshot.indexedDB ?? [],
-    };
-    this.storeAsset(assetName, JSON.stringify(originState), SNAPSHOT_CHUNK_CHARS);
-    const replacedOriginAsset = originAssets[origin];
-    originAssets[origin] = assetName;
+    let replacedOriginAsset: string | undefined;
+    if (resourcesTouched || typeof originAssets[origin] !== 'string') {
+      const assetName = `origin:${crypto.randomUUID()}`;
+      const originState: OriginStorageSnapshot = {
+        localStorage: snapshot.localStorage,
+        sessionStorage: snapshot.sessionStorage,
+        indexedDB: snapshot.indexedDB ?? [],
+      };
+      this.storeAsset(assetName, JSON.stringify(originState), SNAPSHOT_CHUNK_CHARS);
+      replacedOriginAsset = originAssets[origin];
+      originAssets[origin] = assetName;
+    }
     const header: PersistedSnapshotHeader = {
       version: 3,
       url: snapshot.url,
@@ -754,7 +845,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       'INSERT INTO browser_snapshot (singleton, snapshot_json) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET snapshot_json = excluded.snapshot_json',
       JSON.stringify(header),
     );
-    if (replacedOriginAsset && replacedOriginAsset !== assetName) {
+    if (replacedOriginAsset && replacedOriginAsset !== originAssets[origin]) {
       this.ctx.storage.sql.exec('DELETE FROM browser_asset WHERE name = ?', replacedOriginAsset);
     }
     for (const legacyAsset of legacyAssetNames) {
@@ -850,6 +941,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         await pump(runtime, 10_000);
         await this.applySavedState(runtime, snapshot, snapshot.url, true);
       }
+      await this.storageProbe(runtime, true);
       this.runtime = runtime;
       return runtime;
     } catch (error) {
@@ -869,11 +961,15 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private async renewLease(): Promise<void> {
+    const updatedAt = Date.now();
     const expiresAt = Date.now() + SESSION_IDLE_TTL_MS;
     this.ctx.storage.sql.exec(
       'UPDATE browser_session SET updated_at = ?, expires_at = ? WHERE singleton = 1 AND status = ?',
-      Date.now(), expiresAt, 'active',
+      updatedAt, expiresAt, 'active',
     );
+    if (this.cachedSessionRow?.status === 'active') {
+      this.cachedSessionRow = { ...this.cachedSessionRow, updated_at: updatedAt, expires_at: expiresAt };
+    }
     await this.scheduleNextAlarm();
     // Do not retain the runtime with a JS timer. Any pending setTimeout keeps
     // this Durable Object from hibernating and accruing duration charges. Once
@@ -910,9 +1006,9 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async requireRuntime(): Promise<ServoRuntime> {
     const row = this.row();
-    if (!row) throw new Error('Browser session does not exist. Create a new Servo browser session.');
+    if (!row) throw new Error('Browser session does not exist. Omit sessionID or supply a falsy value on a browser action to create a new tab.');
     if (row.status !== 'active') {
-      throw new Error(`Browser session is ${row.status}. Create a new Servo browser session.`);
+      throw new Error(`Browser session is ${row.status}. Omit sessionID or supply a falsy value on a browser action to create a new tab.`);
     }
     if (row.expires_at <= Date.now()) {
       const recording = this.activeRecording();
@@ -922,7 +1018,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
       this.ctx.storage.sql.exec('DELETE FROM browser_asset');
       await this.scheduleNextAlarm();
-      throw new Error('Browser session was reaped after 30 days of inactivity. Create a new Servo browser session.');
+      throw new Error('Browser session was reaped after 30 days of inactivity. Omit sessionID or supply a falsy value on a browser action to create a new tab.');
     }
     if (this.runtime?.trapped) {
       this.clearRuntime();
@@ -944,11 +1040,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
       this.fetchFailures.clear();
       const runtime = await this.requireRuntime();
       try {
-        const previousUrl = (await pageSummary(runtime)).url;
+        const previousUrl = await pageUrl(runtime);
         let result: Awaited<T> = await operation(runtime);
-        const currentPage = await pageSummary(runtime);
-        if (new URL(previousUrl).origin !== new URL(currentPage.url).origin) {
-          await this.restoreNavigatedOrigin(runtime, currentPage.url);
+        const resultObject = typeof result === 'object' && result !== null ? result as Record<string, unknown> : undefined;
+        const resultPage = resultObject && 'page' in resultObject ? resultObject.page as PageSummary : resultObject as PageSummary | undefined;
+        const currentUrl = typeof resultPage?.url === 'string' ? resultPage.url : await pageUrl(runtime);
+        if (new URL(previousUrl).origin !== new URL(currentUrl).origin) {
+          await this.restoreNavigatedOrigin(runtime, currentUrl);
           const restoredPage = await this.summary(runtime);
           if (typeof result === 'object' && result !== null && 'page' in result) {
             result = { ...result, page: restoredPage } as Awaited<T>;
@@ -960,7 +1058,12 @@ export class ServoBrowserSession extends DurableObject<Env> {
       } finally {
         if (this.runtime === runtime && this.row()?.status === 'active') {
           try {
-            await this.captureSnapshot(runtime);
+            const probeAtEnd = await this.storageProbe(runtime, false);
+            const resources = !probeAtEnd || probeAtEnd.fresh
+              ? ALL_STORAGE_PROBES
+              : probeAtEnd;
+            await this.captureSnapshot(runtime, resources);
+            await this.storageProbe(runtime, true);
           } catch (error) {
             console.error(JSON.stringify({ event: 'servo_snapshot_failed', error: String(error) }));
             throw error;
@@ -985,6 +1088,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
         'INSERT INTO browser_session (singleton, status, created_at, updated_at, expires_at, width, height) VALUES (1, ?, ?, ?, ?, ?, ?)',
         'failed', now, now, now, options.width, options.height,
       );
+      this.cachedSessionRow = {
+        status: 'failed', created_at: now, updated_at: now, expires_at: now,
+        width: options.width, height: options.height,
+      };
+      this.sessionRowLoaded = true;
       try {
         if (options.html !== undefined) await this.storeAsset('initial-html', options.html);
         if (options.fontBase64) await this.storeAsset('font:000000', options.fontBase64);
@@ -998,6 +1106,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         if (options.url || options.html !== undefined) await pump(runtime, options.maxDurationMs);
         const page = await this.summary(runtime);
         await this.captureSnapshot(runtime);
+        await this.storageProbe(runtime, true);
         this.writeStatus('active', Date.now() + SESSION_IDLE_TTL_MS);
         await this.renewLease();
         return {
@@ -1047,6 +1156,18 @@ export class ServoBrowserSession extends DurableObject<Env> {
     assertPublicHttpUrl(url);
     return this.operate(async (runtime) => {
       if (!runtime.loadPage(url)) throw new Error('Servo rejected the requested URL.');
+      await pump(runtime, maxDurationMs);
+      return { action: 'navigate', page: await this.summary(runtime) };
+    });
+  }
+
+  async navigateHtml(html: string, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+    if (new TextEncoder().encode(html).byteLength > MAX_PERSISTED_HTML_BYTES) {
+      throw new RangeError(`Inline HTML exceeds ${MAX_PERSISTED_HTML_BYTES} UTF-8 bytes, the resumable-session limit.`);
+    }
+    return this.operate(async (runtime) => {
+      if (!runtime.loadHtml(html)) throw new Error('Servo rejected the supplied HTML document.');
+      await this.storeAsset('initial-html', html);
       await pump(runtime, maxDurationMs);
       return { action: 'navigate', page: await this.summary(runtime) };
     });

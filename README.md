@@ -11,14 +11,25 @@ change the license of Servo or its other dependencies.
 
 ## MCP tools
 
-The server exposes focused tools. Every browser-action tool accepts a `sessions`
-array, so one call can run the same kind of action on up to 20 different tabs,
-with different parameters for each. `servo_session_create` also accepts an
-array of independent create options; status and close accept `sessionIds`.
-Results include a `sessionId` and per-session success or error so one failed tab
-does not hide the others.
+The server exposes focused tools. Every tool accepts an `actions` array of
+objects; each browser action carries an optional `sessionID` alongside its
+arguments. Omit `sessionID` or set it to a falsy value (`null`, `false`, `0`, or
+`""`) to create a new tab and perform the action. A truthy ID must identify an
+existing session: active tabs are reused and sleeping tabs are restored
+automatically. Unknown IDs return `SESSION_NOT_FOUND` with status 404 and an
+MCP error response, without creating replacement tabs. Malformed truthy IDs are
+rejected during input validation.
 
-- `servo_session_create`, `servo_session_status`, `servo_session_close`
+Every tool returns an ordered top-level `responses` array with one response
+object per action. Each object includes `actionIndex`, its resolved `sessionID`
+when applicable, and either the action response or its error. A top-level
+`metadata` object reports aggregate response, success, and failure counts.
+Status checks use the same action shape with empty action objects (`{}`). A new
+session created by a status action returns its status; an existing session
+reports runtime availability without forcing a page reload. HTTP actions do
+not allocate browser sessions.
+
+- `servo_session_status`
 - `servo_navigate`, `servo_reload`, `servo_history`
 - `servo_inspect`, `servo_evaluate`, `servo_get_capabilities`
 - `servo_http_request`, plus `servo_http_get`, `servo_http_post`, `servo_http_put`,
@@ -28,10 +39,14 @@ does not hide the others.
 - `servo_recording_start`, `servo_recording_stop`, `servo_recording_status`,
   `servo_recording_download`
 
-The HTTP request tools call public HTTP(S) endpoints directly. The general tool
+The HTTP request tools call public HTTP(S) endpoints directly. They accept
+`{ "actions": [{ "url": "https://example.com" }, ...] }` without session IDs
+and return ordered objects in the top-level `responses` array, each with
+`actionIndex`, `ok`, and the request response or error. A sibling `metadata`
+object summarizes response, success, and failure counts. Each action in the general tool
 accepts any valid Fetch API method (including extension methods), request
 headers and a UTF-8 body; convenience tools provide common verbs. Results
-include the HTTP status, final URL, response headers, bounded response body
+Each HTTP action response includes the HTTP status, final URL, response headers, bounded response body
 (base64 for binary content), and a `results` array with title, URL, snippet,
 and readable page content. Redirect destinations are checked against the
 public-network policy, cross-origin redirects discard credentials, and the
@@ -42,14 +57,32 @@ remote side effects, so use POST/PUT/PATCH/DELETE only when intended.
 `results` entry for rendered pages, while retaining their existing `page`
 summary for compatibility.
 
-For example, create several tabs with `servo_session_create` using
-`{ "sessions": [{ "url": "https://example.com" }, { "url": "https://example.org" }] }`.
-Then inspect them together with
-`{ "sessions": [{ "sessionId": "…" }, { "sessionId": "…" }] }`, or
-navigate them with per-tab URLs using
-`{ "sessions": [{ "sessionId": "…", "url": "https://example.net" }] }`.
-Keep each returned `sessionId` mapped to its tab; there is no session-list tool.
-Use `servo_session_close` with a `sessionIds` array when those tabs are done.
+For example, open several pages with `servo_navigate`:
+
+```json
+{
+  "actions": [{ "url": "https://example.com" }, { "url": "https://example.org" }]
+}
+```
+
+Then inspect those tabs with `servo_inspect`:
+
+```json
+{
+  "actions": [{ "sessionID": "<first returned ID>" }, { "sessionID": "<second returned ID>" }]
+}
+```
+
+Existing and new tabs can be mixed in one call. Put a session ID directly on each action that targets an existing tab. Non-falsy IDs must be distinct in
+one call. Keep each returned `sessionID` mapped to its tab; there is no
+session-list, session-start, or session-close tool. Sessions expire after
+30 days without use.
+
+New tabs default to 1280 × 720. Optional `width` and `height` in an action
+choose the initial viewport and are rejected with an existing ID. Navigation
+accepts exactly one of `url` or `html` (up to 1 MiB of UTF-8), so inline test
+pages can be loaded directly and restored later. Register a font with
+`servo_register_font` and then navigate using its returned ID when needed.
 
 Screen recording is an asynchronous start/stop/status/download flow. Start a
 recording for a tab, continue browsing it, stop the recording, poll its status
@@ -82,8 +115,7 @@ preserves URL, viewport, scroll position, common form values, registered fonts,
 and the source for inline HTML pages. It does not preserve the JavaScript heap,
 browser history, arbitrary DOM mutations, or application state held only in
 memory. Restoring never replays prior tool actions. Sessions are deleted after
-30 days without use or when closed; closing explicitly also deletes the
-snapshot and saved assets. Letting the Durable Object hibernate avoids billing
+30 days without use, which also deletes the snapshot and saved assets. Letting the Durable Object hibernate avoids billing
 for an application timer that holds it awake; restoring Servo still uses Worker
 CPU time. See [Cloudflare's Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
 
@@ -95,8 +127,8 @@ Servo reports supported, partial, unsupported and unverified features through
 every feature implemented by Servo's native builds; `unsupportedReasons`
 explains known port-specific constraints.
 
-The endpoint currently has no authentication. A `sessionId` is therefore a
-bearer capability: anyone who obtains it can use or close that session. Do not
+The endpoint currently has no authentication. A `sessionID` is therefore a
+bearer capability: anyone who obtains it can use that session. Do not
 share it or use this testing endpoint for sensitive browsing.
 
 The server limits a pump to 15 seconds, resumable inline HTML to 1 MiB, response bodies
