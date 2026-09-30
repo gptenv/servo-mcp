@@ -13,10 +13,11 @@ export interface FakeDurableObjectState {
   id: { toString(): string };
   storage: {
     sql: FakeSqlDatabase;
+    getAlarm(): Promise<number | null>;
     setAlarm(at: number | Date): Promise<void>;
     deleteAlarm(): Promise<void>;
   };
-  alarms: { set: (number | Date)[]; deleted: number };
+  alarms: { set: (number | Date)[]; deleted: number; current: number | null };
   blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T>;
   waitUntil(): void;
 }
@@ -33,13 +34,17 @@ export function createFakeDurableObjectState(idString = 'session-do-id'): FakeDu
   ]);
   sql.createTable('browser_recording_frame', ['recording_id', 'slot_index', 'captured_at', 'jpeg_blob']);
   sql.createTable('browser_recording_output', ['recording_id', 'chunk_index', 'chunk_blob']);
-  const alarms = { set: [] as (number | Date)[], deleted: 0 };
+  const alarms = { set: [] as (number | Date)[], deleted: 0, current: null as number | null };
   return {
     id: { toString: () => idString },
     storage: {
       sql,
-      setAlarm: async (at: number | Date) => { alarms.set.push(at); },
-      deleteAlarm: async () => { alarms.deleted += 1; },
+      getAlarm: async () => alarms.current,
+      setAlarm: async (at: number | Date) => {
+        alarms.set.push(at);
+        alarms.current = at instanceof Date ? at.getTime() : at;
+      },
+      deleteAlarm: async () => { alarms.deleted += 1; alarms.current = null; },
     },
     alarms,
     blockConcurrencyWhile: <T>(callback: () => Promise<T>) => callback(),

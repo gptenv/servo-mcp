@@ -414,8 +414,18 @@ export class ServoBrowserSession extends DurableObject<Env> {
       "SELECT id FROM browser_recording WHERE status = 'encoding' LIMIT 1",
     ).toArray()[0];
     if (encoding) candidates.push(Date.now() + 1_000);
-    if (candidates.length) await this.ctx.storage.setAlarm(Math.min(...candidates));
-    else await this.ctx.storage.deleteAlarm();
+    if (candidates.length) {
+      const nextAlarm = Math.min(...candidates);
+      const currentAlarm = await this.ctx.storage.getAlarm();
+      // Repeated status polls can call this method while an encode is pending.
+      // Preserve an already scheduled earlier wakeup so polling does not keep
+      // moving the asynchronous encoder's alarm into the future.
+      if (currentAlarm === null || currentAlarm > nextAlarm) {
+        await this.ctx.storage.setAlarm(nextAlarm);
+      }
+    } else {
+      await this.ctx.storage.deleteAlarm();
+    }
   }
 
   private async failRecording(recordingId: string, error: unknown): Promise<void> {

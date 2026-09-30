@@ -59,8 +59,10 @@ for up to 30 seconds, with a 60-second maximum. The Durable Object stays active
 while capturing frames, so recording time adds duration charges. Completed files
 and download links are retained for up to 24 hours, with up to three completed
 recordings per tab. The direct download URL is a bearer link; do not share it.
-The bundled encoder is `h264-mp4-encoder` under MIT; its license is included
-with the vendored WASM module.
+The H.264 encoder is compiled from `h264-mp4-encoder` v1.0.12 with Emscripten's
+ahead-of-time Embind bindings and dynamic code generation disabled, so it runs
+under the Worker runtime's code-generation restrictions. Its generated module,
+WASM, source revision, and applicable upstream licenses are in `src/vendor/`.
 
 Each session is one tab routed to its own SQLite-backed Durable Object, which
 serializes operations and stores a chunked restore snapshot. Each completed

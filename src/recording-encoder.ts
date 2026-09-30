@@ -1,4 +1,4 @@
-import { createH264MP4Encoder } from 'h264-mp4-encoder';
+import h264EncoderFactory from './vendor/h264-mp4-encoder-aot.js';
 import h264Mp4Wasm from './vendor/h264-mp4-encoder.wasm';
 
 type H264Encoder = {
@@ -13,31 +13,34 @@ type H264Encoder = {
   initialize(): void;
   addFrameRgba(rgba: Uint8Array): void;
   finalize(): void;
+  delete(): void;
+};
+
+type H264MP4Module = {
+  H264MP4Encoder: new () => H264Encoder;
   FS: {
     readFile(path: string): Uint8Array;
     unlink(path: string): void;
   };
-  delete(): void;
 };
 
 type RecordingFrame = { slot: number; jpeg: Uint8Array };
 
-let encoderQueue: Promise<void> = Promise.resolve();
-let encoderWasmStarted = false;
+let h264ModulePromise: Promise<H264MP4Module> | undefined;
 
-function startEncoderWasm(): void {
-  if (encoderWasmStarted) return;
-  const globals = globalThis as typeof globalThis & {
-    __SERVO_H264_MP4_ENCODER_WASM_MODULE__?: WebAssembly.Module;
-    __SERVO_H264_MP4_ENCODER_START__?: () => void;
-  };
-  globals.__SERVO_H264_MP4_ENCODER_WASM_MODULE__ = h264Mp4Wasm;
-  if (typeof globals.__SERVO_H264_MP4_ENCODER_START__ !== 'function') {
-    throw new Error('The H.264 encoder WASM initializer was not installed. Reinstall dependencies.');
+function getH264Module(): Promise<H264MP4Module> {
+  if (!h264ModulePromise) {
+    h264ModulePromise = h264EncoderFactory({
+      instantiateWasm(imports, receiveInstance) {
+        receiveInstance(new WebAssembly.Instance(h264Mp4Wasm, imports));
+        return {};
+      },
+    });
   }
-  globals.__SERVO_H264_MP4_ENCODER_START__();
-  encoderWasmStarted = true;
+  return h264ModulePromise;
 }
+
+let encoderQueue: Promise<void> = Promise.resolve();
 
 async function encodeQueued(options: {
   width: number;
@@ -48,8 +51,8 @@ async function encodeQueued(options: {
   decode(jpeg: Uint8Array): Promise<{ width: number; height: number; rgba: Uint8Array }>;
 }): Promise<Uint8Array> {
   if (options.totalFrames < 1) throw new Error('The recording contains no frames.');
-  startEncoderWasm();
-  const encoder = await createH264MP4Encoder();
+  const module = await getH264Module();
+  const encoder = new module.H264MP4Encoder();
   const filename = `servo-recording-${crypto.randomUUID()}.mp4`;
   encoder.outputFilename = filename;
   encoder.width = options.width;
@@ -91,16 +94,16 @@ async function encodeQueued(options: {
       nextOutputSlot++;
     }
     encoder.finalize();
-    const mp4 = encoder.FS.readFile(filename).slice();
+    const mp4 = module.FS.readFile(filename).slice();
     if (!mp4.byteLength) throw new Error('The MP4 encoder produced an empty file.');
     return mp4;
   } finally {
-    try { encoder.FS.unlink(filename); } catch {}
+    try { module.FS.unlink(filename); } catch {}
     encoder.delete();
   }
 }
 
-/** Serialize jobs because the encoder package shares its Emscripten FS per Worker isolate. */
+/** Serialize jobs because the encoder module shares one Emscripten FS per Worker isolate. */
 export function encodeRecordingMp4(options: Parameters<typeof encodeQueued>[0]): Promise<Uint8Array> {
   const result = encoderQueue.then(() => encodeQueued(options));
   encoderQueue = result.then(() => undefined, () => undefined);

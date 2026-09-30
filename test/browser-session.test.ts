@@ -928,9 +928,43 @@ describe('session termination', () => {
     const session = await newSession();
     await session.initialize(initOptions());
     const before = state.alarms.set.length;
+    state.alarms.current = null;
     await session.alarm();
     expect(state.alarms.set.length).toBe(before + 1);
     expect(sql().table('browser_session')!.rows[0].status).toBe('active');
+  });
+
+  it('does not postpone a pending recording alarm when status is polled', async () => {
+    const session = await newSession();
+    await session.initialize(initOptions());
+    sql().table('browser_recording')!.rows.push({
+      id: '00000000-0000-4000-8000-000000000002',
+      status: 'encoding',
+      started_at: Date.now() - 2_000,
+      stopped_at: Date.now(),
+      expires_at: Date.now() + 24 * 60 * 60 * 1_000,
+      fps: 1,
+      max_duration_ms: 3_000,
+      max_frames: 3,
+      target_frames: 2,
+      captured_frames: 2,
+      stored_bytes: 0,
+      width: 320,
+      height: 240,
+      download_token: null,
+      error: null,
+    });
+
+    await session.getScreenRecordingStatus('00000000-0000-4000-8000-000000000002');
+    const scheduledAlarm = state.alarms.current;
+    const setCalls = state.alarms.set.length;
+    expect(scheduledAlarm).toBe(Date.now() + 1_000);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await session.getScreenRecordingStatus('00000000-0000-4000-8000-000000000002');
+
+    expect(state.alarms.current).toBe(scheduledAlarm);
+    expect(state.alarms.set).toHaveLength(setCalls);
   });
 
   it('does not schedule an app-level timer to retain the runtime', async () => {
