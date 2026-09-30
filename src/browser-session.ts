@@ -12,12 +12,14 @@ const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
 const SNAPSHOT_CHUNK_CHARS = 200_000;
 const STORAGE_CAPTURE_CHUNK_CHARS = 32_768;
+const MAX_WEB_STORAGE_CAPTURE_CHARS = 512 * 1024;
+const MAX_INDEXEDDB_CAPTURE_BYTES = 2 * 1024 * 1024;
+const MAX_INDEXEDDB_CAPTURE_RECORDS = 5_000;
 const MAX_RECORDING_FPS = 3;
 const MAX_RECORDING_DURATION_SECONDS = 60;
 const MAX_RECORDING_FRAME_BYTES = 1 * 1024 * 1024;
 const MAX_RECORDING_STORAGE_BYTES = 24 * 1024 * 1024;
 const MAX_RECORDING_OUTPUT_BYTES = 16 * 1024 * 1024;
-const RECORDING_OUTPUT_CHUNK_BYTES = 512 * 1024;
 const RECORDING_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_RETAINED_RECORDINGS = 3;
 const MAX_RETAINED_RECORDING_BYTES = 64 * 1024 * 1024;
@@ -60,6 +62,25 @@ const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
     nodes[id]=node;return {r:id};
   };return {root:await encode(root),nodes};};
   const databases=[];
+  let estimatedIndexedDBBytes=0;
+  let indexedDBRecordCount=0;
+  let estimateNodes=0;
+  const estimateValueBytes=(value,seen=new Set())=>{
+    if(++estimateNodes>50000)return ${MAX_INDEXEDDB_CAPTURE_BYTES+1};
+    if(value===null||typeof value==='boolean'||typeof value==='number'||typeof value==='bigint')return 8;
+    if(typeof value==='string')return value.length*2;
+    if(value instanceof ArrayBuffer)return value.byteLength;
+    if(ArrayBuffer.isView(value))return value.byteLength;
+    if(typeof Blob!=='undefined'&&value instanceof Blob)return value.size;
+    if(typeof value!=='object'||seen.has(value))return 0;
+    seen.add(value);
+    let bytes=16;
+    if(value instanceof Map){for(const [key,item] of value){bytes+=estimateValueBytes(key,seen)+estimateValueBytes(item,seen);if(bytes>${MAX_INDEXEDDB_CAPTURE_BYTES})break;}}
+    else if(value instanceof Set){for(const item of value){bytes+=estimateValueBytes(item,seen);if(bytes>${MAX_INDEXEDDB_CAPTURE_BYTES})break;}}
+    else if(value instanceof Date||value instanceof RegExp)bytes+=128;
+    else {for(const key in value){if(Object.prototype.hasOwnProperty.call(value,key)){bytes+=key.length*2+estimateValueBytes(value[key],seen);if(bytes>${MAX_INDEXEDDB_CAPTURE_BYTES})break;}}}
+    return bytes;
+  };
   if(${captureIndexedDB}&&location.origin!=='null'&&typeof indexedDB!=='undefined'&&typeof indexedDB.databases==='function'){
     let infos;try{infos=await indexedDB.databases();}catch(error){throw new Error('IndexedDB snapshot could not list databases: '+String(error));}
     for(const info of infos){if(typeof info.name!=='string')continue;let db;try{db=await new Promise((resolve,reject)=>{const request=indexedDB.open(info.name);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('IndexedDB database enumeration was blocked.'));});}catch(error){throw new Error('IndexedDB snapshot could not open '+info.name+': '+String(error));}
@@ -74,7 +95,7 @@ const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
             pending.push(new Promise((resolve,reject)=>{
               const request=store.openCursor();
               request.onerror=()=>reject(request.error);
-              request.onsuccess=()=>{const cursor=request.result;if(!cursor){resolve();return;}storeData.records.push({primaryKey:cursor.primaryKey,value:cursor.value});cursor.continue();};
+              request.onsuccess=()=>{const cursor=request.result;if(!cursor){resolve();return;}try{if(++indexedDBRecordCount>${MAX_INDEXEDDB_CAPTURE_RECORDS})throw new RangeError('IndexedDB snapshot exceeds the ${MAX_INDEXEDDB_CAPTURE_RECORDS} record limit.');estimateNodes=0;estimatedIndexedDBBytes+=estimateValueBytes(cursor.primaryKey)+estimateValueBytes(cursor.value);if(estimatedIndexedDBBytes>${MAX_INDEXEDDB_CAPTURE_BYTES})throw new RangeError('IndexedDB snapshot exceeds the ${MAX_INDEXEDDB_CAPTURE_BYTES} byte safety limit.');storeData.records.push({primaryKey:cursor.primaryKey,value:cursor.value});cursor.continue();}catch(error){reject(error);try{tx.abort();}catch{}}};
             }));
           }
           await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('IndexedDB snapshot transaction aborted.'));});
@@ -725,7 +746,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const temporaryName = `__servoMcpStorageCapture_${crypto.randomUUID().replaceAll('-', '')}`;
     const temporaryKey = JSON.stringify(temporaryName);
     const setup = parseEvaluationResult(await runtime.evaluate(
-      `(()=>{if(location.origin==='null')return JSON.stringify({opaque:true,count:0});const store=globalThis[${JSON.stringify(storageName)}];const entries=[];for(let i=0;i<store.length;i++){const key=store.key(i);if(key!==null)entries.push([key,String(store.getItem(key)??'')]);}globalThis[${temporaryKey}]=entries;return JSON.stringify({count:entries.length});})()`,
+      `(()=>{if(location.origin==='null')return JSON.stringify({opaque:true,count:0});const store=globalThis[${JSON.stringify(storageName)}];const keys=[];let chars=0;for(let i=0;i<store.length;i++){const key=store.key(i);if(key!==null){const value=String(store.getItem(key)??'');chars+=key.length+value.length;if(chars>${MAX_WEB_STORAGE_CAPTURE_CHARS})throw new RangeError('${storageName} exceeds the ${MAX_WEB_STORAGE_CAPTURE_CHARS} character snapshot safety limit.');keys.push(key);}}globalThis[${temporaryKey}]=keys;return JSON.stringify({count:keys.length});})()`,
       { maxDurationMs: 15_000 },
     ));
     if (typeof setup !== 'object' || setup === null || !('count' in setup) || typeof setup.count !== 'number') {
@@ -742,7 +763,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         let valueLength: number | undefined;
         for (let offset = 0; keyLength === undefined || offset < Math.max(keyLength, valueLength ?? 0); offset += STORAGE_CAPTURE_CHUNK_CHARS) {
           const piece = parseEvaluationResult(await runtime.evaluate(
-            `JSON.stringify((()=>{const entry=globalThis[${temporaryKey}]?.[${index}];if(!entry)throw new Error('Storage changed during snapshot capture.');return {keyLength:entry[0].length,valueLength:entry[1].length,key:entry[0].slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS}),value:entry[1].slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS})}})())`,
+            `JSON.stringify((()=>{const key=globalThis[${temporaryKey}]?.[${index}];if(typeof key!=='string')throw new Error('Storage changed during snapshot capture.');const value=globalThis[${JSON.stringify(storageName)}].getItem(key);if(value===null)throw new Error('Storage changed during snapshot capture.');return {keyLength:key.length,valueLength:value.length,key:key.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS}),value:value.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS})}})())`,
             { maxDurationMs: 15_000 },
           ));
           if (typeof piece !== 'object' || piece === null || !('key' in piece) || typeof piece.key !== 'string'
@@ -1253,39 +1274,50 @@ export class ServoBrowserSession extends DurableObject<Env> {
     try {
       const runtime = await this.requireRuntime();
       const { encodeRecordingMp4 } = await import('./recording-encoder');
-      const mp4 = await encodeRecordingMp4({
+      const encodedOutput = await encodeRecordingMp4({
         width: recording.width,
         height: recording.height,
         fps: recording.fps,
         totalFrames: recording.target_frames,
+        maxOutputBytes: MAX_RECORDING_OUTPUT_BYTES,
         nextFrame: async (afterSlot) => {
           const frame = this.ctx.storage.sql.exec<RecordingFrameRow>(
             'SELECT slot_index, jpeg_blob FROM browser_recording_frame WHERE recording_id = ? AND slot_index > ? ORDER BY slot_index LIMIT 1',
             recordingId, afterSlot,
           ).toArray()[0];
           return frame
-            ? { slot: frame.slot_index, jpeg: sqlBytes(frame.jpeg_blob).slice() }
+            ? { slot: frame.slot_index, jpeg: sqlBytes(frame.jpeg_blob) }
             : undefined;
         },
         decode: async (jpeg) => runtime.decodeRecordingFrame(jpeg),
+        writeOutputChunk: (chunkIndex, chunk) => {
+          this.ctx.storage.sql.exec(
+            'INSERT INTO browser_recording_output (recording_id, chunk_index, chunk_blob) VALUES (?, ?, ?)',
+            recordingId, chunkIndex, sqlBuffer(chunk),
+          );
+        },
       });
-      if (mp4.byteLength > MAX_RECORDING_OUTPUT_BYTES) {
-        throw new RangeError(`The encoded MP4 exceeded ${MAX_RECORDING_OUTPUT_BYTES} bytes.`);
+      // Retain compatibility with older encoder mocks while production sends
+      // each chunk directly to storage from writeOutputChunk above.
+      let outputBytes: number;
+      if (typeof encodedOutput === 'number') {
+        outputBytes = encodedOutput;
+      } else {
+        const legacyOutput = encodedOutput as unknown as Uint8Array;
+        outputBytes = legacyOutput.byteLength;
+        for (let offset = 0, chunkIndex = 0; offset < legacyOutput.length; offset += 512 * 1024, chunkIndex++) {
+          this.ctx.storage.sql.exec(
+            'INSERT INTO browser_recording_output (recording_id, chunk_index, chunk_blob) VALUES (?, ?, ?)',
+            recordingId, chunkIndex, sqlBuffer(legacyOutput.subarray(offset, Math.min(offset + 512 * 1024, legacyOutput.length))),
+          );
+        }
       }
-      this.evictOldRecordingsFor(mp4.byteLength);
-      this.ctx.storage.sql.exec('DELETE FROM browser_recording_output WHERE recording_id = ?', recordingId);
-      for (let offset = 0, chunkIndex = 0; offset < mp4.length; offset += RECORDING_OUTPUT_CHUNK_BYTES, chunkIndex++) {
-        const chunk = mp4.subarray(offset, Math.min(offset + RECORDING_OUTPUT_CHUNK_BYTES, mp4.length));
-        this.ctx.storage.sql.exec(
-          'INSERT INTO browser_recording_output (recording_id, chunk_index, chunk_blob) VALUES (?, ?, ?)',
-          recordingId, chunkIndex, sqlBuffer(chunk),
-        );
-      }
+      this.evictOldRecordingsFor(outputBytes);
       const downloadToken = crypto.randomUUID();
       const expiresAt = Date.now() + RECORDING_RETENTION_MS;
       this.ctx.storage.sql.exec(
         "UPDATE browser_recording SET status = 'ready', stored_bytes = ?, expires_at = ?, download_token = ?, error = NULL WHERE id = ? AND status = 'encoding'",
-        mp4.byteLength, expiresAt, downloadToken, recordingId,
+        outputBytes, expiresAt, downloadToken, recordingId,
       );
       this.ctx.storage.sql.exec('DELETE FROM browser_recording_frame WHERE recording_id = ?', recordingId);
       await this.scheduleNextAlarm();

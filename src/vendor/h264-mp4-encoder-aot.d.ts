@@ -16,7 +16,10 @@ type H264MP4EncoderInstance = {
 type H264MP4EncoderModule = {
   H264MP4Encoder: new () => H264MP4EncoderInstance;
   FS: {
-    readFile(path: string): Uint8Array;
+    open(path: string, flags?: string | number): unknown;
+    stat(path: string): { size: number };
+    read(stream: unknown, buffer: Uint8Array, offset: number, length: number, position: number): number;
+    close(stream: unknown): void;
     unlink(path: string): void;
   };
 };

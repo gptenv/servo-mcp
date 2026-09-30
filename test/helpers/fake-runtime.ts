@@ -153,7 +153,7 @@ export class FakeServoRuntime {
     }
     if (script.includes("location.origin==='null'") && script.includes('const store=globalThis[')) {
       const storageName = script.match(/const store=globalThis\[("localStorage"|"sessionStorage")\]/)?.[1];
-      const temporaryName = script.match(/globalThis\[("__servoMcpStorageCapture_[^"]+")\]=entries/)?.[1];
+      const temporaryName = script.match(/globalThis\[("__servoMcpStorageCapture_[^"]+")\]=(?:entries|keys)/)?.[1];
       if (!storageName || !temporaryName) return Promise.resolve(null);
       const entries = this.capturedStorage[JSON.parse(storageName)] ?? [];
       this.storageCaptures.set(JSON.parse(temporaryName), entries);
@@ -161,17 +161,23 @@ export class FakeServoRuntime {
       this.evaluations.push({ script, result: value });
       return Promise.resolve(value);
     }
-    if (script.includes('const entry=globalThis[')) {
+    if (script.includes('const entry=globalThis[') || script.includes('const key=globalThis[')) {
       const temporaryName = script.match(/const entry=globalThis\[("__servoMcpStorageCapture_[^"]+")\]/)?.[1];
+      const keyTemporaryName = script.match(/const key=globalThis\[("__servoMcpStorageCapture_[^"]+")\]/)?.[1];
+      const storageNameLiteral = script.match(/globalThis\[("localStorage"|"sessionStorage")\]/)?.[1];
+      const storageName = storageNameLiteral === undefined ? undefined : JSON.parse(storageNameLiteral) as 'localStorage' | 'sessionStorage';
       const index = Number(script.match(/\?\.\[(\d+)\]/)?.[1]);
       const offset = Number(script.match(/\.slice\((\d+),/)?.[1]);
       const entry = temporaryName === undefined ? undefined : this.storageCaptures.get(JSON.parse(temporaryName))?.[index];
-      if (!entry) return Promise.resolve(null);
+      const key = keyTemporaryName === undefined ? undefined : this.storageCaptures.get(JSON.parse(keyTemporaryName))?.[index]?.[0];
+      const valueEntry = storageName === undefined || key === undefined ? undefined : this.capturedStorage[storageName]?.find(([storedKey]) => storedKey === key);
+      const selected = entry ?? valueEntry;
+      if (!selected) return Promise.resolve(null);
       const value = {
-        keyLength: entry[0].length,
-        valueLength: entry[1].length,
-        key: entry[0].slice(offset, offset + 32_768),
-        value: entry[1].slice(offset, offset + 32_768),
+        keyLength: selected[0].length,
+        valueLength: selected[1].length,
+        key: selected[0].slice(offset, offset + 32_768),
+        value: selected[1].slice(offset, offset + 32_768),
       };
       const result = { Ok: { String: JSON.stringify(value) } };
       this.evaluations.push({ script, result });

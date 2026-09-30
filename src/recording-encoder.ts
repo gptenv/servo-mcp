@@ -19,12 +19,16 @@ type H264Encoder = {
 type H264MP4Module = {
   H264MP4Encoder: new () => H264Encoder;
   FS: {
-    readFile(path: string): Uint8Array;
+    open(path: string, flags?: string | number): unknown;
+    stat(path: string): { size: number };
+    read(stream: unknown, buffer: Uint8Array, offset: number, length: number, position: number): number;
+    close(stream: unknown): void;
     unlink(path: string): void;
   };
 };
 
 type RecordingFrame = { slot: number; jpeg: Uint8Array };
+const OUTPUT_CHUNK_BYTES = 512 * 1024;
 
 let h264ModulePromise: Promise<H264MP4Module> | undefined;
 
@@ -47,9 +51,11 @@ async function encodeQueued(options: {
   height: number;
   fps: number;
   totalFrames: number;
+  maxOutputBytes: number;
   nextFrame(afterSlot: number): Promise<RecordingFrame | undefined>;
   decode(jpeg: Uint8Array): Promise<{ width: number; height: number; rgba: Uint8Array }>;
-}): Promise<Uint8Array> {
+  writeOutputChunk(chunkIndex: number, chunk: Uint8Array): void;
+}): Promise<number> {
   if (options.totalFrames < 1) throw new Error('The recording contains no frames.');
   const module = await getH264Module();
   const encoder = new module.H264MP4Encoder();
@@ -94,9 +100,27 @@ async function encodeQueued(options: {
       nextOutputSlot++;
     }
     encoder.finalize();
-    const mp4 = module.FS.readFile(filename).slice();
-    if (!mp4.byteLength) throw new Error('The MP4 encoder produced an empty file.');
-    return mp4;
+    const outputBytes = module.FS.stat(filename).size;
+    if (!outputBytes) throw new Error('The MP4 encoder produced an empty file.');
+    if (outputBytes > options.maxOutputBytes) {
+      throw new RangeError(`The encoded MP4 exceeded ${options.maxOutputBytes} bytes.`);
+    }
+    // Emscripten's FS.readFile allocates another full-size JS buffer. Read the
+    // finalized file through one reusable bounded buffer so output is flushed
+    // to durable storage a chunk at a time.
+    const stream = module.FS.open(filename, 'r');
+    try {
+      const buffer = new Uint8Array(Math.min(OUTPUT_CHUNK_BYTES, outputBytes));
+      for (let offset = 0, chunkIndex = 0; offset < outputBytes; offset += OUTPUT_CHUNK_BYTES, chunkIndex++) {
+        const length = Math.min(OUTPUT_CHUNK_BYTES, outputBytes - offset);
+        const read = module.FS.read(stream, buffer, 0, length, offset);
+        if (read !== length) throw new Error('The MP4 encoder returned a truncated output chunk.');
+        options.writeOutputChunk(chunkIndex, buffer.subarray(0, length));
+      }
+    } finally {
+      module.FS.close(stream);
+    }
+    return outputBytes;
   } finally {
     try { module.FS.unlink(filename); } catch {}
     encoder.delete();
@@ -104,7 +128,7 @@ async function encodeQueued(options: {
 }
 
 /** Serialize jobs because the encoder module shares one Emscripten FS per Worker isolate. */
-export function encodeRecordingMp4(options: Parameters<typeof encodeQueued>[0]): Promise<Uint8Array> {
+export function encodeRecordingMp4(options: Parameters<typeof encodeQueued>[0]): Promise<number> {
   const result = encoderQueue.then(() => encodeQueued(options));
   encoderQueue = result.then(() => undefined, () => undefined);
   return result;
