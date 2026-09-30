@@ -25,6 +25,8 @@ does not hide the others.
   `servo_http_patch`, `servo_http_delete`, `servo_http_head`, and `servo_http_options`
 - `servo_click`, `servo_type_text`, `servo_press_key`, `servo_scroll`, `servo_wait`
 - `servo_screenshot`, `servo_register_font`
+- `servo_recording_start`, `servo_recording_stop`, `servo_recording_status`,
+  `servo_recording_download`
 
 The HTTP request tools call public HTTP(S) endpoints directly. The general tool
 accepts any valid Fetch API method (including extension methods), request
@@ -48,6 +50,17 @@ navigate them with per-tab URLs using
 `{ "sessions": [{ "sessionId": "…", "url": "https://example.net" }] }`.
 Keep each returned `sessionId` mapped to its tab; there is no session-list tool.
 Use `servo_session_close` with a `sessionIds` array when those tabs are done.
+
+Screen recording is an asynchronous start/stop/status/download flow. Start a
+recording for a tab, continue browsing it, stop the recording, poll its status
+while the Worker encodes H.264 MP4, then request the direct download link. The
+recording captures video only, at up to 960×540 and 3 fps; the default is 2 fps
+for up to 30 seconds, with a 60-second maximum. The Durable Object stays active
+while capturing frames, so recording time adds duration charges. Completed files
+and download links are retained for up to 24 hours, with up to three completed
+recordings per tab. The direct download URL is a bearer link; do not share it.
+The bundled encoder is `h264-mp4-encoder` under MIT; its license is included
+with the vendored WASM module.
 
 Each session is one tab routed to its own SQLite-backed Durable Object, which
 serializes operations and stores a chunked restore snapshot. Each completed
@@ -114,15 +127,15 @@ SQLite class is declared in `wrangler.jsonc`; apply its migration when
 deploying.
 
 Run `npm run typecheck` and `npm test` for the app checks. `npm run deploy:dry-run`
-builds Servo and asks Wrangler to calculate the bundle without deploying.
-The Servo binary is close to Cloudflare's 64 MiB Worker bundle ceiling, so the
-combined Worker bundle must be measured before any deployment.
+builds Servo and asks Wrangler to calculate the bundle without deploying. The
+screen-recording source currently dry-runs at 51,850.93 KiB (15,787.40 KiB
+gzip), below Cloudflare's 64 MiB Worker bundle ceiling.
 
 ## Test deployment
 
 Deployed on 2026-09-30 to the authenticated Cloudflare account. The live Worker
-uses Durable Object-backed browser sessions and the focused multi-session MCP
-tools documented above.
+uses Durable Object-backed browser sessions. The screen-recording tools above
+are source changes and are not live until a later deployment.
 
 - MCP endpoint: <https://servo-mcp.defcronyke.workers.dev/mcp>
 - Health: <https://servo-mcp.defcronyke.workers.dev/health>

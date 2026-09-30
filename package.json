@@ -6,6 +6,7 @@
   "license": "MIT",
   "description": "A ChatGPT MCP App that runs Servo WASM in a Cloudflare Worker.",
   "scripts": {
+    "postinstall": "node scripts/patch-h264-mp4-encoder.mjs",
     "engine:build": "cd servo-wasm && ./mach build --target wasm32-unknown-unknown --no-default-features --jobs 2 --profile production-stripped --manifest-path ports/servo-js-wasm/Cargo.toml",
     "dev": "wrangler dev --ip 127.0.0.1 --port 8788",
     "typecheck": "tsc --noEmit",
@@ -16,6 +17,7 @@
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "^0.24.0",
+    "h264-mp4-encoder": "1.0.12",
     "zod": "^4.6.5"
   },
   "devDependencies": {

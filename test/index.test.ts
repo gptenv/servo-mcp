@@ -59,6 +59,10 @@ function makeSession(): Session {
     reload: vi.fn(async () => ({ action: 'reload' })),
     wait: vi.fn(async () => ({ action: 'wait' })),
     screenshot: vi.fn(async () => ({ page: { title: 'Example' }, png })),
+    startScreenRecording: vi.fn(async (fps: number, maxDurationSeconds: number) => ({ recordingId: '00000000-0000-4000-8000-000000000003', status: 'recording', fps, maxDurationSeconds })),
+    stopScreenRecording: vi.fn(async (recordingId: string) => ({ recordingId, status: 'encoding' })),
+    getScreenRecordingStatus: vi.fn(async (recordingId: string) => ({ recordingId, status: 'ready' })),
+    getScreenRecordingDownloadInfo: vi.fn(async (recordingId: string) => ({ recordingId, status: 'ready', downloadToken: 'token', sizeBytes: 42, expiresAt: 1_900_000_000_000 })),
     registerFont: vi.fn(async () => ({ faces: 1 })),
     capabilities: vi.fn(async () => ({ supported: ['dom'] })),
   };
@@ -127,6 +131,7 @@ describe('MCP Worker routes and server registration', () => {
       'servo_http_patch', 'servo_http_delete', 'servo_http_head', 'servo_http_options',
       'servo_evaluate', 'servo_click', 'servo_type_text', 'servo_press_key',
       'servo_scroll', 'servo_history', 'servo_reload', 'servo_wait', 'servo_screenshot',
+      'servo_recording_start', 'servo_recording_stop', 'servo_recording_status', 'servo_recording_download',
       'servo_register_font', 'servo_get_capabilities',
     ]);
 
@@ -231,6 +236,25 @@ describe('focused browser tools', () => {
     expect(defaultSession.scroll).toHaveBeenCalledWith(1, 2, undefined, undefined, 10_000);
     expect(defaultSession.wait).toHaveBeenCalledWith(1_000);
     expect(defaultSession.registerFont).toHaveBeenCalledWith('Zm9udA==');
+  });
+
+  it('routes recording start, stop, status, and download tools', async () => {
+    const recordingId = '00000000-0000-4000-8000-000000000003';
+    const started = structured(await invoke('servo_recording_start', { sessions: [{ sessionId, fps: 3, maxDurationSeconds: 12 }] }));
+    expect(started.results[0]).toMatchObject({ ok: true, result: { recordingId, status: 'recording' } });
+    expect(defaultSession.startScreenRecording).toHaveBeenCalledWith(3, 12);
+
+    const stopped = structured(await invoke('servo_recording_stop', { sessions: [{ sessionId, recordingId }] }));
+    expect(stopped.results[0]).toMatchObject({ ok: true, result: { status: 'encoding' } });
+    expect(defaultSession.stopScreenRecording).toHaveBeenCalledWith(recordingId);
+
+    expect(structured(await invoke('servo_recording_status', { sessions: [{ sessionId, recordingId }] })).results[0])
+      .toMatchObject({ ok: true, result: { status: 'ready' } });
+    const download = structured(await invoke('servo_recording_download', { sessions: [{ sessionId, recordingId }] }));
+    expect(download.results[0].result).toMatchObject({
+      recordingId, status: 'ready', downloadUrl: `https://worker.example/recordings/${sessionId}/${recordingId}/token`,
+      filename: `servo-recording-${recordingId}.mp4`, mimeType: 'video/mp4', sizeBytes: 42,
+    });
   });
 
   it('isolates per-session failures and reports malformed or duplicate calls', async () => {

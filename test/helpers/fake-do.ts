@@ -26,6 +26,13 @@ export function createFakeDurableObjectState(idString = 'session-do-id'): FakeDu
   sql.createTable('browser_session', ['singleton', 'status', 'created_at', 'updated_at', 'expires_at', 'width', 'height']);
   sql.createTable('browser_snapshot', ['singleton', 'snapshot_json']);
   sql.createTable('browser_asset', ['name', 'chunk_index', 'chunk_text']);
+  sql.createTable('browser_recording', [
+    'id', 'status', 'started_at', 'stopped_at', 'expires_at', 'fps', 'max_duration_ms',
+    'max_frames', 'target_frames', 'captured_frames', 'stored_bytes', 'width', 'height',
+    'download_token', 'error',
+  ]);
+  sql.createTable('browser_recording_frame', ['recording_id', 'slot_index', 'captured_at', 'jpeg_blob']);
+  sql.createTable('browser_recording_output', ['recording_id', 'chunk_index', 'chunk_blob']);
   const alarms = { set: [] as (number | Date)[], deleted: 0 };
   return {
     id: { toString: () => idString },

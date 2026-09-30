@@ -26,6 +26,60 @@ export class FakeSqlDatabase {
 
     if (/^CREATE TABLE IF NOT EXISTS/i.test(statement)) return this.finish([]);
 
+    if (/^SELECT id, fps FROM browser_recording WHERE status = 'recording' LIMIT 1$/i.test(statement)) {
+      const row = (this.tables.get('browser_recording')?.rows ?? []).find((item) => item.status === 'recording');
+      return this.finish(row ? [{ id: row.id, fps: row.fps }] : []);
+    }
+    if (/^SELECT \* FROM browser_recording WHERE id = \?$/i.test(statement)) {
+      return this.finish((this.tables.get('browser_recording')?.rows ?? []).filter((row) => row.id === params[0]));
+    }
+    if (/^SELECT \* FROM browser_recording WHERE status = 'recording' LIMIT 1$/i.test(statement)) {
+      const row = (this.tables.get('browser_recording')?.rows ?? []).find((item) => item.status === 'recording');
+      return this.finish(row ? [row] : []);
+    }
+    if (/^SELECT id FROM browser_recording WHERE status IN \('recording', 'encoding'\) LIMIT 1$/i.test(statement)) {
+      const row = (this.tables.get('browser_recording')?.rows ?? []).find((item) => item.status === 'recording' || item.status === 'encoding');
+      return this.finish(row ? [{ id: row.id }] : []);
+    }
+    if (/^SELECT id FROM browser_recording WHERE status IN \('ready', 'failed'\) AND expires_at <= \?$/i.test(statement)) {
+      return this.finish((this.tables.get('browser_recording')?.rows ?? [])
+        .filter((row) => (row.status === 'ready' || row.status === 'failed') && Number(row.expires_at) <= Number(params[0]))
+        .map(({ id }) => ({ id })));
+    }
+    if (/^SELECT id, stored_bytes FROM browser_recording WHERE status = 'ready' ORDER BY started_at ASC$/i.test(statement)) {
+      return this.finish((this.tables.get('browser_recording')?.rows ?? [])
+        .filter((row) => row.status === 'ready')
+        .sort((a, b) => Number(a.started_at) - Number(b.started_at))
+        .map(({ id, stored_bytes }) => ({ id, stored_bytes })));
+    }
+    if (/^SELECT MAX\(slot_index\) AS slot_index FROM browser_recording_frame WHERE recording_id = \?$/i.test(statement)) {
+      const slots = (this.tables.get('browser_recording_frame')?.rows ?? [])
+        .filter((row) => row.recording_id === params[0])
+        .map((row) => Number(row.slot_index));
+      return this.finish([{ slot_index: slots.length ? Math.max(...slots) : null }]);
+    }
+    if (/^SELECT slot_index, jpeg_blob FROM browser_recording_frame WHERE recording_id = \? AND slot_index > \? ORDER BY slot_index LIMIT 1$/i.test(statement)) {
+      const row = (this.tables.get('browser_recording_frame')?.rows ?? [])
+        .filter((item) => item.recording_id === params[0] && Number(item.slot_index) > Number(params[1]))
+        .sort((a, b) => Number(a.slot_index) - Number(b.slot_index))[0];
+      return this.finish(row ? [{ slot_index: row.slot_index, jpeg_blob: row.jpeg_blob }] : []);
+    }
+    if (/^SELECT chunk_blob FROM browser_recording_output WHERE recording_id = \? ORDER BY chunk_index$/i.test(statement)) {
+      return this.finish((this.tables.get('browser_recording_output')?.rows ?? [])
+        .filter((row) => row.recording_id === params[0])
+        .sort((a, b) => Number(a.chunk_index) - Number(b.chunk_index))
+        .map(({ chunk_blob }) => ({ chunk_blob })));
+    }
+    if (/^SELECT MIN\(expires_at\) AS expires_at FROM browser_recording WHERE status IN \('ready', 'failed'\)$/i.test(statement)) {
+      const expiries = (this.tables.get('browser_recording')?.rows ?? [])
+        .filter((row) => row.status === 'ready' || row.status === 'failed')
+        .map((row) => Number(row.expires_at));
+      return this.finish([{ expires_at: expiries.length ? Math.min(...expiries) : null }]);
+    }
+    if (/^SELECT id FROM browser_recording WHERE status = 'encoding' LIMIT 1$/i.test(statement)) {
+      const row = (this.tables.get('browser_recording')?.rows ?? []).find((item) => item.status === 'encoding');
+      return this.finish(row ? [{ id: row.id }] : []);
+    }
     if (/^SELECT status, created_at, updated_at, expires_at, width, height FROM browser_session WHERE singleton = 1$/i.test(statement)) {
       return this.finish(this.tables.get('browser_session')?.rows ?? []);
     }

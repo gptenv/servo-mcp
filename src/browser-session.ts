@@ -12,6 +12,18 @@ const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
 const SNAPSHOT_CHUNK_CHARS = 200_000;
 const STORAGE_CAPTURE_CHUNK_CHARS = 32_768;
+const MAX_RECORDING_FPS = 3;
+const MAX_RECORDING_DURATION_SECONDS = 60;
+const MAX_RECORDING_FRAME_BYTES = 1 * 1024 * 1024;
+const MAX_RECORDING_STORAGE_BYTES = 24 * 1024 * 1024;
+const MAX_RECORDING_OUTPUT_BYTES = 16 * 1024 * 1024;
+const RECORDING_OUTPUT_CHUNK_BYTES = 512 * 1024;
+const RECORDING_RETENTION_MS = 24 * 60 * 60 * 1000;
+const MAX_RETAINED_RECORDINGS = 3;
+const MAX_RETAINED_RECORDING_BYTES = 64 * 1024 * 1024;
+const RECORDING_FRAME_WIDTH = 960;
+const RECORDING_FRAME_HEIGHT = 540;
+const RECORDING_JPEG_QUALITY = 70;
 const pageSummaryExpression = `JSON.stringify({url: location.href, title: document.title, text: (document.body?.innerText || '').slice(0, 20000)})`;
 const resumeStateExpression = `(async()=>{
   const nodePath=(node)=>{const path=[];for(let current=node;current&&current!==document.documentElement;current=current.parentElement){const parent=current.parentElement;if(!parent)return null;path.unshift(Array.prototype.indexOf.call(parent.children,current));}return path;};
@@ -134,6 +146,36 @@ type SessionRow = {
   height: number;
 };
 
+type RecordingStatus = 'recording' | 'encoding' | 'ready' | 'failed' | 'expired';
+type RecordingRow = {
+  id: string;
+  status: RecordingStatus;
+  started_at: number;
+  stopped_at: number | null;
+  expires_at: number;
+  fps: number;
+  max_duration_ms: number;
+  max_frames: number;
+  target_frames: number;
+  captured_frames: number;
+  stored_bytes: number;
+  width: number;
+  height: number;
+  download_token: string | null;
+  error: string | null;
+};
+
+type RecordingFrameRow = { slot_index: number; jpeg_blob: ArrayBuffer };
+type RecordingOutputRow = { chunk_blob: ArrayBuffer };
+
+function sqlBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
+  return value instanceof Uint8Array ? value : new Uint8Array(value);
+}
+
+function sqlBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.slice().buffer as ArrayBuffer;
+}
+
 export type PageSummary = { url: string; title: string; text: string; loadError?: string };
 export type BrowserActionResult = { action: string; page: PageSummary };
 
@@ -242,6 +284,8 @@ function snapshotForOrigin(snapshot: ResumeSnapshot, url: string): ResumeSnapsho
 export class ServoBrowserSession extends DurableObject<Env> {
   private runtime: ServoRuntime | undefined;
   private queue: Promise<void> = Promise.resolve();
+  private recordingTimer: ReturnType<typeof setInterval> | undefined;
+  private recordingCapturePending = false;
   // Host fetch failures (DNS, TLS, connection errors) during the current
   // operation, keyed by URL, so a failed page load is reported to the caller.
   private fetchFailures = new Map<string, string>();
@@ -274,6 +318,47 @@ export class ServoBrowserSession extends DurableObject<Env> {
           PRIMARY KEY (name, chunk_index)
         )
       `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS browser_recording (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          stopped_at INTEGER,
+          expires_at INTEGER NOT NULL,
+          fps INTEGER NOT NULL,
+          max_duration_ms INTEGER NOT NULL,
+          max_frames INTEGER NOT NULL,
+          target_frames INTEGER NOT NULL DEFAULT 0,
+          captured_frames INTEGER NOT NULL DEFAULT 0,
+          stored_bytes INTEGER NOT NULL DEFAULT 0,
+          width INTEGER NOT NULL DEFAULT 0,
+          height INTEGER NOT NULL DEFAULT 0,
+          download_token TEXT,
+          error TEXT
+        )
+      `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS browser_recording_frame (
+          recording_id TEXT NOT NULL,
+          slot_index INTEGER NOT NULL,
+          captured_at INTEGER NOT NULL,
+          jpeg_blob BLOB NOT NULL,
+          PRIMARY KEY (recording_id, slot_index)
+        )
+      `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS browser_recording_output (
+          recording_id TEXT NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          chunk_blob BLOB NOT NULL,
+          PRIMARY KEY (recording_id, chunk_index)
+        )
+      `);
+      const active = ctx.storage.sql.exec<{ id: string; fps: number }>(
+        "SELECT id, fps FROM browser_recording WHERE status = 'recording' LIMIT 1",
+      ).toArray()[0];
+      if (active) this.startRecordingTimer(active.id, active.fps);
+      await this.scheduleNextAlarm();
     });
   }
 
@@ -287,6 +372,162 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<SessionRow>(
       'SELECT status, created_at, updated_at, expires_at, width, height FROM browser_session WHERE singleton = 1',
     ).toArray()[0];
+  }
+
+  private recording(id: string): RecordingRow | undefined {
+    return this.ctx.storage.sql.exec<RecordingRow>(
+      'SELECT * FROM browser_recording WHERE id = ?', id,
+    ).toArray()[0];
+  }
+
+  private activeRecording(): RecordingRow | undefined {
+    return this.ctx.storage.sql.exec<RecordingRow>(
+      "SELECT * FROM browser_recording WHERE status = 'recording' LIMIT 1",
+    ).toArray()[0];
+  }
+
+  private clearRecordingTimer(): void {
+    if (this.recordingTimer !== undefined) clearInterval(this.recordingTimer);
+    this.recordingTimer = undefined;
+  }
+
+  private startRecordingTimer(recordingId: string, fps: number): void {
+    this.clearRecordingTimer();
+    this.recordingTimer = setInterval(() => {
+      if (this.recordingCapturePending) return;
+      this.recordingCapturePending = true;
+      void this.serial(() => this.captureRecordingFrame(recordingId))
+        .catch((error) => console.error(JSON.stringify({ event: 'servo_recording_capture_failed', recordingId, error: String(error) })))
+        .finally(() => { this.recordingCapturePending = false; });
+    }, Math.max(100, Math.floor(1000 / fps)));
+  }
+
+  private async scheduleNextAlarm(): Promise<void> {
+    const candidates: number[] = [];
+    const session = this.row();
+    if (session?.status === 'active') candidates.push(session.expires_at);
+    const recordingExpiry = this.ctx.storage.sql.exec<{ expires_at: number | null }>(
+      "SELECT MIN(expires_at) AS expires_at FROM browser_recording WHERE status IN ('ready', 'failed')",
+    ).toArray()[0]?.expires_at;
+    if (typeof recordingExpiry === 'number') candidates.push(recordingExpiry);
+    const encoding = this.ctx.storage.sql.exec<{ id: string }>(
+      "SELECT id FROM browser_recording WHERE status = 'encoding' LIMIT 1",
+    ).toArray()[0];
+    if (encoding) candidates.push(Date.now() + 1_000);
+    if (candidates.length) await this.ctx.storage.setAlarm(Math.min(...candidates));
+    else await this.ctx.storage.deleteAlarm();
+  }
+
+  private async failRecording(recordingId: string, error: unknown): Promise<void> {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
+    const expiresAt = Date.now() + RECORDING_RETENTION_MS;
+    this.ctx.storage.sql.exec(
+      "UPDATE browser_recording SET status = 'failed', expires_at = ?, error = ?, download_token = NULL WHERE id = ? AND status IN ('recording', 'encoding')",
+      expiresAt, message, recordingId,
+    );
+    this.ctx.storage.sql.exec('DELETE FROM browser_recording_frame WHERE recording_id = ?', recordingId);
+    this.ctx.storage.sql.exec('DELETE FROM browser_recording_output WHERE recording_id = ?', recordingId);
+    this.clearRecordingTimer();
+    await this.scheduleNextAlarm();
+  }
+
+  private async beginRecordingEncoding(recording: RecordingRow, stoppedAt = Date.now()): Promise<void> {
+    if (recording.status !== 'recording') return;
+    const end = Math.min(stoppedAt, recording.started_at + recording.max_duration_ms);
+    const elapsed = Math.max(1, end - recording.started_at);
+    const lastSlot = this.ctx.storage.sql.exec<{ slot_index: number | null }>(
+      'SELECT MAX(slot_index) AS slot_index FROM browser_recording_frame WHERE recording_id = ?', recording.id,
+    ).toArray()[0]?.slot_index;
+    const targetFrames = Math.min(recording.max_frames, Math.max(
+      1,
+      Math.ceil(elapsed * recording.fps / 1000),
+      typeof lastSlot === 'number' ? lastSlot + 1 : 0,
+    ));
+    this.ctx.storage.sql.exec(
+      "UPDATE browser_recording SET status = 'encoding', stopped_at = ?, target_frames = ?, expires_at = ?, error = NULL WHERE id = ? AND status = 'recording'",
+      end, targetFrames, Date.now() + RECORDING_RETENTION_MS, recording.id,
+    );
+    this.clearRecordingTimer();
+    await this.ctx.storage.setAlarm(Date.now() + 1_000);
+  }
+
+  private async captureRecordingFrame(recordingId: string, initial = false): Promise<void> {
+    const recording = this.recording(recordingId);
+    if (!recording || recording.status !== 'recording') return;
+    const now = Date.now();
+    const deadline = recording.started_at + recording.max_duration_ms;
+    if (!initial && now >= deadline) {
+      await this.beginRecordingEncoding(recording, deadline);
+      return;
+    }
+    const slot = initial ? 0 : Math.min(
+      recording.max_frames - 1,
+      Math.floor((now - recording.started_at) * recording.fps / 1000),
+    );
+    const lastSlot = this.ctx.storage.sql.exec<{ slot_index: number | null }>(
+      'SELECT MAX(slot_index) AS slot_index FROM browser_recording_frame WHERE recording_id = ?', recordingId,
+    ).toArray()[0]?.slot_index;
+    if (typeof lastSlot === 'number' && slot <= lastSlot) return;
+
+    try {
+      const runtime = await this.requireRuntime();
+      const frame = await runtime.captureRecordingFrame({
+        maxWidth: RECORDING_FRAME_WIDTH,
+        maxHeight: RECORDING_FRAME_HEIGHT,
+        quality: RECORDING_JPEG_QUALITY,
+      });
+      if (frame.jpeg.byteLength > MAX_RECORDING_FRAME_BYTES) {
+        throw new RangeError(`A recording frame exceeded ${MAX_RECORDING_FRAME_BYTES} bytes.`);
+      }
+      const current = this.recording(recordingId);
+      if (!current || current.status !== 'recording') return;
+      if (current.stored_bytes + frame.jpeg.byteLength > MAX_RECORDING_STORAGE_BYTES) {
+        throw new RangeError(`Recording frames exceeded ${MAX_RECORDING_STORAGE_BYTES} bytes of temporary storage.`);
+      }
+      this.ctx.storage.sql.exec(
+        'INSERT INTO browser_recording_frame (recording_id, slot_index, captured_at, jpeg_blob) VALUES (?, ?, ?, ?)',
+        recordingId, slot, Date.now(), sqlBuffer(frame.jpeg),
+      );
+      this.ctx.storage.sql.exec(
+        'UPDATE browser_recording SET captured_frames = captured_frames + 1, stored_bytes = stored_bytes + ?, width = ?, height = ? WHERE id = ? AND status = ?',
+        frame.jpeg.byteLength, frame.width, frame.height, recordingId, 'recording',
+      );
+      const updated = this.recording(recordingId);
+      if (updated && (updated.captured_frames >= updated.max_frames || Date.now() >= deadline)) {
+        await this.beginRecordingEncoding(updated, Math.min(Date.now(), deadline));
+      }
+    } catch (error) {
+      await this.failRecording(recordingId, error);
+    }
+  }
+
+  private async pruneExpiredRecordings(now = Date.now()): Promise<void> {
+    const expired = this.ctx.storage.sql.exec<{ id: string }>(
+      "SELECT id FROM browser_recording WHERE status IN ('ready', 'failed') AND expires_at <= ?", now,
+    ).toArray();
+    for (const { id } of expired) {
+      this.ctx.storage.sql.exec('DELETE FROM browser_recording_frame WHERE recording_id = ?', id);
+      this.ctx.storage.sql.exec('DELETE FROM browser_recording_output WHERE recording_id = ?', id);
+      this.ctx.storage.sql.exec("UPDATE browser_recording SET status = 'expired', download_token = NULL, error = NULL WHERE id = ?", id);
+    }
+  }
+
+  private evictOldRecordingsFor(incomingBytes: number): void {
+    const ready = this.ctx.storage.sql.exec<{ id: string; stored_bytes: number }>(
+      "SELECT id, stored_bytes FROM browser_recording WHERE status = 'ready' ORDER BY started_at ASC",
+    ).toArray();
+    let retainedBytes = ready.reduce((total, recording) => total + recording.stored_bytes, 0);
+    while (ready.length >= MAX_RETAINED_RECORDINGS || retainedBytes + incomingBytes > MAX_RETAINED_RECORDING_BYTES) {
+      const oldest = ready.shift();
+      if (!oldest) break;
+      retainedBytes -= oldest.stored_bytes;
+      this.ctx.storage.sql.exec('DELETE FROM browser_recording_output WHERE recording_id = ?', oldest.id);
+      this.ctx.storage.sql.exec('DELETE FROM browser_recording_frame WHERE recording_id = ?', oldest.id);
+      this.ctx.storage.sql.exec(
+        "UPDATE browser_recording SET status = 'expired', download_token = NULL, error = NULL WHERE id = ?",
+        oldest.id,
+      );
+    }
   }
 
   private writeStatus(status: SessionStatus, expiresAt = Date.now()): void {
@@ -623,7 +864,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       'UPDATE browser_session SET updated_at = ?, expires_at = ? WHERE singleton = 1 AND status = ?',
       Date.now(), expiresAt, 'active',
     );
-    await this.ctx.storage.setAlarm(expiresAt);
+    await this.scheduleNextAlarm();
     // Do not retain the runtime with a JS timer. Any pending setTimeout keeps
     // this Durable Object from hibernating and accruing duration charges. Once
     // the request and snapshot writes finish, let Cloudflare hibernate the DO;
@@ -640,17 +881,21 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private async expireIfIdle(): Promise<void> {
+    await this.pruneExpiredRecordings();
     const row = this.row();
-    if (row?.status !== 'active') return;
-    if (row.expires_at > Date.now()) {
-      await this.renewLease();
-      return;
+    if (row?.status === 'active') {
+      if (row.expires_at > Date.now()) {
+        await this.scheduleNextAlarm();
+        return;
+      }
+      const recording = this.activeRecording();
+      if (recording) await this.failRecording(recording.id, 'The browser session expired while recording.');
+      this.clearRuntime();
+      this.writeStatus('expired');
+      this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
+      this.ctx.storage.sql.exec('DELETE FROM browser_asset');
     }
-    this.clearRuntime();
-    this.writeStatus('expired');
-    await this.ctx.storage.deleteAlarm();
-    this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-    this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+    await this.scheduleNextAlarm();
   }
 
   private async requireRuntime(): Promise<ServoRuntime> {
@@ -660,11 +905,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
       throw new Error(`Browser session is ${row.status}. Create a new Servo browser session.`);
     }
     if (row.expires_at <= Date.now()) {
+      const recording = this.activeRecording();
+      if (recording) await this.failRecording(recording.id, 'The browser session expired while recording.');
       this.clearRuntime();
       this.writeStatus('expired');
-      await this.ctx.storage.deleteAlarm();
       this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
       this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+      await this.scheduleNextAlarm();
       throw new Error('Browser session was reaped after 30 days of inactivity. Create a new Servo browser session.');
     }
     if (this.runtime?.trapped) {
@@ -675,7 +922,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         await this.restoreRuntime(row);
       } catch (error) {
         this.writeStatus('failed');
-        await this.ctx.storage.deleteAlarm();
+        await this.scheduleNextAlarm();
         throw new Error(`Saved tab could not be restored: ${String(error)}`);
       }
     }
@@ -764,11 +1011,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
       const row = this.row();
       if (!row) return { status: 'missing', runtimeAvailable: false, resumable: false };
       if (row.status === 'active' && row.expires_at <= Date.now()) {
+        const recording = this.activeRecording();
+        if (recording) await this.failRecording(recording.id, 'The browser session expired while recording.');
         this.clearRuntime();
         this.writeStatus('expired');
-        await this.ctx.storage.deleteAlarm();
         this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
         this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+        await this.scheduleNextAlarm();
         return { status: 'expired', updatedAt: row.updated_at, expiresAt: row.expires_at, runtimeAvailable: false, resumable: false };
       }
       if (row.status === 'active' && this.runtime?.trapped) {
@@ -867,6 +1116,187 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }));
   }
 
+  private async finalizeRecording(recordingId: string): Promise<void> {
+    const recording = this.recording(recordingId);
+    if (!recording || recording.status !== 'encoding') return;
+    try {
+      const runtime = await this.requireRuntime();
+      const { encodeRecordingMp4 } = await import('./recording-encoder');
+      const mp4 = await encodeRecordingMp4({
+        width: recording.width,
+        height: recording.height,
+        fps: recording.fps,
+        totalFrames: recording.target_frames,
+        nextFrame: async (afterSlot) => {
+          const frame = this.ctx.storage.sql.exec<RecordingFrameRow>(
+            'SELECT slot_index, jpeg_blob FROM browser_recording_frame WHERE recording_id = ? AND slot_index > ? ORDER BY slot_index LIMIT 1',
+            recordingId, afterSlot,
+          ).toArray()[0];
+          return frame
+            ? { slot: frame.slot_index, jpeg: sqlBytes(frame.jpeg_blob).slice() }
+            : undefined;
+        },
+        decode: async (jpeg) => runtime.decodeRecordingFrame(jpeg),
+      });
+      if (mp4.byteLength > MAX_RECORDING_OUTPUT_BYTES) {
+        throw new RangeError(`The encoded MP4 exceeded ${MAX_RECORDING_OUTPUT_BYTES} bytes.`);
+      }
+      this.evictOldRecordingsFor(mp4.byteLength);
+      this.ctx.storage.sql.exec('DELETE FROM browser_recording_output WHERE recording_id = ?', recordingId);
+      for (let offset = 0, chunkIndex = 0; offset < mp4.length; offset += RECORDING_OUTPUT_CHUNK_BYTES, chunkIndex++) {
+        const chunk = mp4.subarray(offset, Math.min(offset + RECORDING_OUTPUT_CHUNK_BYTES, mp4.length));
+        this.ctx.storage.sql.exec(
+          'INSERT INTO browser_recording_output (recording_id, chunk_index, chunk_blob) VALUES (?, ?, ?)',
+          recordingId, chunkIndex, sqlBuffer(chunk),
+        );
+      }
+      const downloadToken = crypto.randomUUID();
+      const expiresAt = Date.now() + RECORDING_RETENTION_MS;
+      this.ctx.storage.sql.exec(
+        "UPDATE browser_recording SET status = 'ready', stored_bytes = ?, expires_at = ?, download_token = ?, error = NULL WHERE id = ? AND status = 'encoding'",
+        mp4.byteLength, expiresAt, downloadToken, recordingId,
+      );
+      this.ctx.storage.sql.exec('DELETE FROM browser_recording_frame WHERE recording_id = ?', recordingId);
+      await this.scheduleNextAlarm();
+    } catch (error) {
+      await this.failRecording(recordingId, error);
+    }
+  }
+
+  async startScreenRecording(fps = 2, maxDurationSeconds = 30): Promise<{
+    recordingId: string; status: RecordingStatus; fps: number; maxDurationSeconds: number; startedAt: number;
+  }> {
+    return this.serial(async () => {
+      if (!Number.isInteger(fps) || fps < 1 || fps > MAX_RECORDING_FPS) {
+        throw new RangeError(`Recording fps must be between 1 and ${MAX_RECORDING_FPS}.`);
+      }
+      if (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 1 || maxDurationSeconds > MAX_RECORDING_DURATION_SECONDS) {
+        throw new RangeError(`Recording duration must be between 1 and ${MAX_RECORDING_DURATION_SECONDS} seconds.`);
+      }
+      const inProgress = this.ctx.storage.sql.exec<{ id: string }>(
+        "SELECT id FROM browser_recording WHERE status IN ('recording', 'encoding') LIMIT 1",
+      ).toArray()[0];
+      if (inProgress) throw new Error('This tab already has a recording in progress.');
+      await this.requireRuntime();
+      const recordingId = crypto.randomUUID();
+      const startedAt = Date.now();
+      const maxDurationMs = maxDurationSeconds * 1000;
+      const maxFrames = fps * maxDurationSeconds;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO browser_recording (id, status, started_at, expires_at, fps, max_duration_ms, max_frames) VALUES (?, 'recording', ?, ?, ?, ?, ?)",
+        recordingId, startedAt, startedAt + maxDurationMs + RECORDING_RETENTION_MS, fps, maxDurationMs, maxFrames,
+      );
+      await this.captureRecordingFrame(recordingId, true);
+      const recording = this.recording(recordingId);
+      if (!recording || recording.status !== 'recording') {
+        throw new Error(recording?.error ?? 'The first screen recording frame could not be captured.');
+      }
+      this.startRecordingTimer(recordingId, fps);
+      await this.renewLease();
+      return { recordingId, status: 'recording', fps, maxDurationSeconds, startedAt };
+    });
+  }
+
+  async stopScreenRecording(recordingId: string): Promise<{ recordingId: string; status: RecordingStatus; targetFrames: number; stoppedAt?: number }> {
+    return this.serial(async () => {
+      const recording = this.recording(recordingId);
+      if (!recording) throw new Error('Screen recording was not found for this tab.');
+      if (recording.status === 'recording') await this.beginRecordingEncoding(recording);
+      const updated = this.recording(recordingId)!;
+      return { recordingId, status: updated.status, targetFrames: updated.target_frames, stoppedAt: updated.stopped_at ?? undefined };
+    });
+  }
+
+  async getScreenRecordingStatus(recordingId: string): Promise<{
+    recordingId: string; status: RecordingStatus; fps: number; capturedFrames: number; targetFrames: number;
+    width: number; height: number; sizeBytes: number; startedAt: number; stoppedAt?: number; expiresAt: number; error?: string;
+  }> {
+    return this.serial(async () => {
+      await this.pruneExpiredRecordings();
+      await this.scheduleNextAlarm();
+      const recording = this.recording(recordingId);
+      if (!recording) throw new Error('Screen recording was not found for this tab.');
+      const targetFrames = recording.status === 'recording'
+        ? Math.min(recording.max_frames, Math.max(1, Math.ceil(
+          Math.min(Date.now() - recording.started_at, recording.max_duration_ms) * recording.fps / 1000,
+        )))
+        : recording.target_frames;
+      return {
+        recordingId,
+        status: recording.status,
+        fps: recording.fps,
+        capturedFrames: recording.captured_frames,
+        targetFrames,
+        width: recording.width,
+        height: recording.height,
+        sizeBytes: recording.status === 'ready' ? recording.stored_bytes : 0,
+        startedAt: recording.started_at,
+        stoppedAt: recording.stopped_at ?? undefined,
+        expiresAt: recording.expires_at,
+        error: recording.error ?? undefined,
+      };
+    });
+  }
+
+  async getScreenRecordingDownloadInfo(recordingId: string): Promise<{
+    recordingId: string; status: RecordingStatus; downloadToken?: string; sizeBytes: number; expiresAt: number;
+  }> {
+    return this.serial(async () => {
+      await this.pruneExpiredRecordings();
+      await this.scheduleNextAlarm();
+      const recording = this.recording(recordingId);
+      if (!recording) throw new Error('Screen recording was not found for this tab.');
+      const ready = recording.status === 'ready' && recording.expires_at > Date.now() && recording.download_token !== null;
+      return {
+        recordingId,
+        status: recording.status,
+        downloadToken: ready ? recording.download_token! : undefined,
+        sizeBytes: ready ? recording.stored_bytes : 0,
+        expiresAt: recording.expires_at,
+      };
+    });
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+    const parts = new URL(request.url).pathname.split('/').filter(Boolean);
+    if (parts.length !== 4 || parts[0] !== 'recordings') return new Response('Not found', { status: 404 });
+    const [, sessionId, recordingId, token] = parts;
+    if (!/^[0-9a-f-]{36}$/i.test(sessionId) || !/^[0-9a-f-]{36}$/i.test(recordingId) || !/^[0-9a-f-]{36}$/i.test(token)) {
+      return new Response('Not found', { status: 404 });
+    }
+    return this.serial(async () => {
+      const recording = this.recording(recordingId);
+      if (!recording || recording.status !== 'ready' || recording.expires_at <= Date.now() || recording.download_token !== token) {
+        return new Response('Recording is unavailable or its download link has expired.', { status: 404 });
+      }
+      const rows = this.ctx.storage.sql.exec<RecordingOutputRow>(
+        'SELECT chunk_blob FROM browser_recording_output WHERE recording_id = ? ORDER BY chunk_index', recordingId,
+      ).toArray();
+      if (!rows.length) return new Response('Recording data is missing.', { status: 410 });
+      const chunks = rows.map(({ chunk_blob }) => sqlBytes(chunk_blob));
+      let index = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (index >= chunks.length) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunks[index++]);
+        },
+      });
+      return new Response(body, {
+        headers: {
+          'Content-Type': 'video/mp4',
+          'Content-Disposition': `attachment; filename="servo-recording-${recordingId}.mp4"`,
+          'Content-Length': String(recording.stored_bytes),
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    });
+  }
+
   async capabilities(): Promise<unknown> {
     return this.operate(async (runtime) => runtime.capabilities());
   }
@@ -886,17 +1316,28 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   async close(): Promise<{ status: 'closed' }> {
     return this.serial(async () => {
+      this.clearRecordingTimer();
+      const active = this.ctx.storage.sql.exec<{ id: string }>(
+        "SELECT id FROM browser_recording WHERE status IN ('recording', 'encoding') LIMIT 1",
+      ).toArray()[0];
+      if (active) await this.failRecording(active.id, 'The browser session was closed before recording completed.');
       this.clearRuntime();
       const row = this.row();
       if (row && row.status !== 'closed') this.writeStatus('closed');
-      await this.ctx.storage.deleteAlarm();
       this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
       this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+      await this.scheduleNextAlarm();
       return { status: 'closed' };
     });
   }
 
   async alarm(): Promise<void> {
-    await this.serial(() => this.expireIfIdle());
+    await this.serial(async () => {
+      const pending = this.ctx.storage.sql.exec<{ id: string }>(
+        "SELECT id FROM browser_recording WHERE status = 'encoding' LIMIT 1",
+      ).toArray()[0];
+      if (pending) await this.finalizeRecording(pending.id);
+      await this.expireIfIdle();
+    });
   }
 }

@@ -46,6 +46,11 @@ const waitSchema = multiSession({
 const screenshotSchema = multiSession({
   fullPage: z.boolean().default(false), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(5_000),
 });
+const recordingStartSchema = multiSession({
+  fps: z.number().int().min(1).max(3).default(2),
+  maxDurationSeconds: z.number().int().min(1).max(60).default(30),
+});
+const recordingIdSchema = multiSession({ recordingId: z.string().uuid() });
 const registerFontSchema = multiSession({ fontBase64: z.string().min(1).max(MAX_FONT_BASE64_BYTES) });
 const capabilitiesSchema = multiSession({});
 const inspectSchema = multiSession({});
@@ -81,11 +86,12 @@ function errorResult(error: unknown) {
   return { isError: true, content: [{ type: 'text' as const, text: message }] };
 }
 
-function createServer(env: Env) {
+function createServer(env: Env, publicOrigin: string) {
   const server = new McpServer({ name: 'servo-mcp', version: '0.3.0' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Create one session per tab, keep a mapping from a short description to its returned sessionId, and pass that exact ID in the sessions list for later operations. Each focused browser tool accepts multiple per-session entries and runs them concurrently. Close only the sessions you are done with.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
+      'Screen recordings capture the viewport as low-frame-rate H.264 MP4 without audio. Start with servo_recording_start, browse while it records, stop with servo_recording_stop, check asynchronous encoding with servo_recording_status, then get a direct download link with servo_recording_download. The Durable Object stays active while a recording is running, which can add duration charges; recordings default to 2 fps and 30 seconds and are capped at 3 fps and 60 seconds. Up to three completed recordings per tab are kept for 24 hours. Download URLs are bearer links; do not share them.',
       'Each tool keeps one focused purpose. For example, servo_navigate accepts multiple {sessionId,url,maxDurationMs} entries and servo_click accepts multiple entries with independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident.',
       'Snapshots preserve the current URL, viewport, scroll position, common form values, every localStorage and sessionStorage entry, the full cookie jar including HttpOnly cookies, IndexedDB schemas and records for each visited origin, and registered fonts. Restoring reloads the page so page scripts run again; JavaScript heap state, browser history, and arbitrary in-memory DOM/application state are not restored. Cache Storage remains runtime-local and incomplete. Sessions expire after 30 days without use or when closed with servo_session_close.',
       'A sessionId is a bearer capability because this public MCP server currently has no authentication. Do not share it. Only navigate to public HTTP(S) pages; private/local network targets are blocked.',
@@ -266,6 +272,50 @@ function createServer(env: Env) {
     return { results, images };
   }));
 
+  server.registerTool('servo_recording_start', {
+    title: 'Servo recording start',
+    description: 'Start asynchronous screen recording for selected tabs. Captures a downscaled viewport as H.264 MP4 at 1–3 fps, without audio. The Durable Object remains active during recording; the default maximum is 30 seconds and the hard limit is 60 seconds. Returns a recordingId for stop, status, and download calls.',
+    inputSchema: recordingStartSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) =>
+    browser.startScreenRecording(group.fps, group.maxDurationSeconds),
+  )));
+
+  server.registerTool('servo_recording_stop', {
+    title: 'Servo recording stop',
+    description: 'Stop a screen recording and queue MP4 encoding in the background. Returns immediately with the encoding status; use servo_recording_status to check completion.',
+    inputSchema: recordingIdSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) =>
+    browser.stopScreenRecording(group.recordingId),
+  )));
+
+  server.registerTool('servo_recording_status', {
+    title: 'Servo recording status',
+    description: 'Check whether a screen recording is active, encoding, ready to download, failed, or expired. Poll this tool after stop until the status is ready.',
+    inputSchema: recordingIdSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, (browser, group) =>
+    browser.getScreenRecordingStatus(group.recordingId),
+  )));
+
+  server.registerTool('servo_recording_download', {
+    title: 'Servo recording download',
+    description: 'Return a direct MP4 download URL when asynchronous encoding is complete. If status is still encoding, check again later. Download links expire after 24 hours.',
+    inputSchema: recordingIdSchema,
+  }, async ({ sessions }) => safely(async () => runSessions(sessions, async (browser, group) => {
+    const info = await browser.getScreenRecordingDownloadInfo(group.recordingId);
+    const downloadUrl = info.downloadToken
+      ? new URL(`/recordings/${group.sessionId}/${group.recordingId}/${info.downloadToken}`, publicOrigin).href
+      : undefined;
+    return {
+      recordingId: info.recordingId,
+      status: info.status,
+      downloadUrl,
+      filename: downloadUrl ? `servo-recording-${group.recordingId}.mp4` : undefined,
+      mimeType: downloadUrl ? 'video/mp4' : undefined,
+      sizeBytes: info.sizeBytes,
+      expiresAt: info.expiresAt,
+    };
+  })));
+
   server.registerTool('servo_register_font', {
     title: 'Servo register font',
     description: 'Register per-session base64-encoded TTF/OTF/TTC/OTC fonts in multiple tabs in parallel. Register before navigating to pages that need them.',
@@ -287,6 +337,11 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ ok: true, name: 'servo-mcp' });
-    return createMcpHandler(() => createServer(env), { route: '/mcp' })(request, env, ctx);
+    if (url.pathname.startsWith('/recordings/')) {
+      const sessionId = url.pathname.split('/')[2];
+      if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) return new Response('Not found', { status: 404 });
+      return env.BROWSER_SESSIONS.getByName(sessionId).fetch(request);
+    }
+    return createMcpHandler(() => createServer(env, url.origin), { route: '/mcp' })(request, env, ctx);
   },
 };
