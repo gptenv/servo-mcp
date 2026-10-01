@@ -1,0 +1,1 @@
+Please use install rustup if you don't have it yet and then use rustup to install the full most recent rust-nightly toolchain and also its wasm32-unknown-unknown target, and make sure you also have other common programming build tools and compiler stuff such as gcc, clang, gdb, llvm, and also please have fun with everything you're doing because this is all for fun! :)
