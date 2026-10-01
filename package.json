@@ -6,12 +6,14 @@
   "license": "MIT",
   "description": "A ChatGPT MCP App that runs Servo WASM in a Cloudflare Worker.",
   "scripts": {
-    "engine:build": "cd servo-wasm && ./mach build --target wasm32-unknown-unknown --no-default-features --jobs 2 --profile production-stripped --manifest-path ports/servo-js-wasm/Cargo.toml",
-    "dev": "wrangler dev --ip 127.0.0.1 --port 8788",
+    "engine:fetch": "node --env-file-if-exists=.env scripts/fetch-servo-wasm-artifact.mjs",
+    "engine:build": "npm run engine:fetch",
+    "dev": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js dev --ip 127.0.0.1 --port 8788",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "deploy": "npm run engine:build && wrangler deploy",
-    "deploy:dry-run": "npm run engine:build && wrangler deploy --dry-run"
+    "deploy": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy",
+    "deploy:dry-run": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy --dry-run",
+    "deploy:staged": "wrangler deploy"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",

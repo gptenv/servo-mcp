@@ -9,7 +9,7 @@
     {
       "type": "CompiledWasm",
       "globs": [
-        "servo-wasm/target/wasm32-unknown-unknown/production-stripped/servo_js_wasm.wasm",
+        "src/vendor/servo-worker/servo_js_wasm.wasm",
         "src/vendor/h264-mp4-encoder.wasm"
       ],
       "fallthrough": true

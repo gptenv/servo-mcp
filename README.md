@@ -139,17 +139,25 @@ resolution. Do not remove either layer when deploying.
 
 ## Local setup
 
-The `servo-wasm/` submodule is pinned to the engine revision this app targets.
-Initialize it, install the Rust target, and build the production artifact
-incrementally:
+The app downloads the deployable Servo Worker package from the latest successful
+`main` run of the public `gptenv/servo-wasm` Actions workflow. For local use,
+create a fine-grained GitHub PAT scoped only to `gptenv/servo-wasm` with
+**Actions: Read**, then copy `.env.example` to `.env` and set
+`SERVO_WASM_GITHUB_TOKEN`. The token stays in the ignored local `.env` file;
+never commit `.env` or put this PAT in GitHub Actions secrets.
 
 ```sh
-git submodule update --init --depth 1
-rustup target add wasm32-unknown-unknown
-npm install
-npm run engine:build
+npm ci
+npm run typecheck
+npm test
 npm run dev
 ```
+
+`npm run engine:fetch` downloads the latest successful, unexpired Servo artifact
+through GitHub's official Actions API, verifies its commit and SHA-256 manifest,
+and stages the adapter and WASM under the ignored
+`src/vendor/servo-worker/` directory. `npm run deploy` and `npm run dev` do
+this automatically. The generated package is not committed.
 
 The local health endpoint is `http://127.0.0.1:8788/health`; the MCP endpoint is
 `http://127.0.0.1:8788/mcp`. Connect ChatGPT Developer Mode or MCP Inspector to
@@ -160,10 +168,29 @@ Objects, separate from the stateless MCP transport. The `ServoBrowserSession`
 SQLite class is declared in `wrangler.jsonc`; apply its migration when
 deploying.
 
-Run `npm run typecheck` and `npm test` for the app checks. `npm run deploy:dry-run`
-builds Servo and asks Wrangler to calculate the bundle without deploying. The
-screen-recording source currently dry-runs at 51,850.93 KiB (15,787.40 KiB
-gzip), below Cloudflare's 64 MiB Worker bundle ceiling.
+Run `npm run typecheck` and `npm test` for the app checks. `npm run
+deploy:dry-run` fetches the latest verified artifact and asks Wrangler to
+calculate the bundle without deploying. `npm run deploy:staged` deploys an
+already staged package and is used by CI after its build job succeeds.
+
+## Continuous deployment
+
+Pull requests run the typecheck and app tests. After those pass on `main`, CI
+checks out the public `servo-wasm` `main` source in its temporary runner,
+builds and tests the Worker WASM, validates the MCP bundle, and then deploys the
+successful build to Cloudflare. CI does not need or receive
+`SERVO_WASM_GITHUB_TOKEN`.
+
+Add these repository secrets under **Settings → Secrets and variables →
+Actions** to enable production deployment:
+
+- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token scoped to the target account
+  with Workers Scripts:Edit and Account Settings:Read.
+- `CLOUDFLARE_ACCOUNT_ID`: the target Cloudflare account ID.
+
+The Cloudflare token is separate from the local GitHub PAT. The GitHub PAT is
+only for local artifact retrieval; the CI deployment uses Cloudflare credentials
+stored as GitHub Actions secrets.
 
 ## Test deployment
 

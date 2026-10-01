@@ -35,8 +35,8 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   createdRuntimes.push(runtime);
   return runtime;
 });
-vi.mock('../servo-wasm/ports/servo-js-wasm/worker-adapter.mjs', () => ({ createServoWorkerRuntime }));
-vi.mock('../servo-wasm/target/wasm32-unknown-unknown/production-stripped/servo_js_wasm.wasm', () => ({
+vi.mock('./helpers/servo-worker-adapter.ts', () => ({ createServoWorkerRuntime }));
+vi.mock('../src/vendor/servo-worker/servo_js_wasm.wasm', () => ({
   default: {},
 }));
 vi.mock('../src/recording-encoder', () => ({ encodeRecordingMp4: vi.fn(async () => new Uint8Array([0, 0, 0, 0])) }));

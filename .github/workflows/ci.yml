@@ -1,4 +1,4 @@
-name: CI
+name: CI and production deploy
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -27,4 +27,150 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test -- --coverage
+      - run: npm test
+
+  build-worker:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # CI builds the public rolling main source directly, so the local-only
+      # SERVO_WASM_GITHUB_TOKEN is never copied into GitHub Actions.
+      - name: Fetch current servo-wasm main source
+        run: git clone --depth 1 --branch main --recurse-submodules --shallow-submodules https://github.com/gptenv/servo-wasm.git servo-wasm-source
+
+      - uses: ./servo-wasm-source/.github/actions/setup-python
+        with:
+          python-version-file-path: servo-wasm-source/.python-version
+
+      - name: Install Servo build dependencies
+        run: |
+          sudo apt update
+          sudo apt install --yes clang-19
+          ./servo-wasm-source/mach bootstrap --yes --skip-lints --skip-nextest
+
+      - name: Add the raw WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install pinned WASI toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/wasi-sdk-29.0-x86_64-linux.tar.gz"
+          curl -fsSL --retry 3 --output "$archive" \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz
+          echo '87d1d1a2879d139cdc624b968efad3d4a97b8078cdff95e63ac88ecafd1a0171  '"$archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/wasi-sdk-29.0-x86_64-linux"
+          test -f "$sdk/share/wasi-sysroot/lib/wasm32-wasi/libc.a"
+          test -f "$sdk/share/wasi-sysroot/lib/wasm32-wasi/libc++.a"
+          test -f "$sdk/share/wasi-sysroot/lib/wasm32-wasi/libc++abi.a"
+          test -f "$sdk/share/wasi-sysroot/lib/wasm32-wasi/libwasi-emulated-getpid.a"
+          test -f "$sdk/share/wasi-sysroot/include/wasm32-wasi/stdio.h"
+          test -f "$sdk/share/wasi-sysroot/include/wasm32-wasi/c++/v1/cstdio"
+          test ! -e /usr/share/wasi-sysroot
+          sudo ln -s "$sdk/share/wasi-sysroot" /usr/share/wasi-sysroot
+          mkdir -p "$RUNNER_TEMP/servo-worker-toolchain-bin"
+          ln -s "$GITHUB_WORKSPACE/servo-wasm-source/.github/scripts/worker-clang" "$RUNNER_TEMP/servo-worker-toolchain-bin/clang"
+          ln -s "$GITHUB_WORKSPACE/servo-wasm-source/.github/scripts/worker-clang" "$RUNNER_TEMP/servo-worker-toolchain-bin/clang++"
+          chmod +x "$GITHUB_WORKSPACE/servo-wasm-source/.github/scripts/worker-clang"
+          printf '#include <stdio.h>\nint probe(void) { return EOF; }\n' | \
+            SERVO_WASI_SDK_DIR="$sdk" "$RUNNER_TEMP/servo-worker-toolchain-bin/clang" \
+              --target=wasm32-unknown-unknown -D__wasi__=1 -nostdlib -x c -c -o "$RUNNER_TEMP/wasi-stdio-probe.o" -
+          printf '#include <cstdio>\nint probe() { return EOF; }\n' | \
+            SERVO_WASI_SDK_DIR="$sdk" "$RUNNER_TEMP/servo-worker-toolchain-bin/clang++" \
+              --target=wasm32-unknown-unknown -D__wasi__=1 -nostdlib -x c++ -c -o "$RUNNER_TEMP/wasi-cstdio-probe.o" -
+          printf '#include <cstring>\nint probe() { return std::strlen("ok"); }\n' | \
+            SERVO_WASI_SDK_DIR="$sdk" "$RUNNER_TEMP/servo-worker-toolchain-bin/clang++" \
+              --target=wasm32-unknown-unknown -D__wasi__=1 -nostdlib -x c++ -c -o "$RUNNER_TEMP/wasi-cstring-probe.o" -
+          echo "SERVO_WASI_SDK_DIR=$sdk" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/servo-worker-toolchain-bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: worker-wasm-production-main
+          workspaces: servo-wasm-source -> servo-wasm-source/target
+
+      - name: Build the production Worker WASM
+        working-directory: servo-wasm-source
+        env:
+          WASM_CXX_LIB_DIR: ${{ runner.temp }}/wasi-sdk-29.0-x86_64-linux/share/wasi-sysroot/lib/wasm32-wasi
+        shell: bash
+        run: |
+          set -o pipefail
+          ./mach build --target wasm32-unknown-unknown --no-default-features --jobs 2 \
+            --profile production-stripped --manifest-path ports/servo-js-wasm/Cargo.toml -- --locked
+
+      - name: Test the Worker adapter and WASM
+        working-directory: servo-wasm-source/ports/servo-js-wasm
+        run: |
+          npm ci
+          npm test
+
+      - name: Assemble and verify the deployment package
+        working-directory: servo-wasm-source/ports/servo-js-wasm
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/servo-worker-package"
+          mkdir -p "$package_dir"
+          cp ../../target/wasm32-unknown-unknown/production-stripped/servo_js_wasm.wasm "$package_dir/"
+          cp worker-adapter.mjs "$package_dir/"
+          node release-manifest.mjs > "$package_dir/release-manifest.json"
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import { readFileSync } from "node:fs";
+            import { createHash } from "node:crypto";
+            const dir = process.env.RUNNER_TEMP + "/servo-worker-package/";
+            const manifest = JSON.parse(readFileSync(dir + "release-manifest.json", "utf8"));
+            const hash = (name) => createHash("sha256").update(readFileSync(dir + name)).digest("hex");
+            assert.match(manifest.gitCommit, /^[a-f0-9]{40}$/);
+            assert.equal(manifest.wasmSha256, hash("servo_js_wasm.wasm"));
+            assert.equal(manifest.adapterSha256, hash("worker-adapter.mjs"));
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: servo-mcp-worker-assets-${{ github.sha }}
+          path: ${{ runner.temp }}/servo-worker-package/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-worker:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [checks, build-worker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: servo-mcp-worker-assets-${{ github.sha }}
+          path: src/vendor/servo-worker
+
+      - name: Validate the production bundle
+        run: npm run deploy:staged -- --dry-run
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy the production Worker
+        run: npm run deploy:staged
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

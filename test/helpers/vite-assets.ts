@@ -1,6 +1,6 @@
 /**
  * Shared Vite plugin that lets Vitest (which parses imports before `vi.mock`
- * can intercept them) load the Worker source files that import non-JS assets:
+ * can intercept them) load the Worker source files that import generated or non-JS assets:
  *  - `src/browser-widget.html`  -> exported as a plain string module
  *  - `*.wasm`                   -> exported as an empty object module
  * The real behaviour of those modules is irrelevant to unit tests; the code
@@ -16,7 +16,12 @@ export function assetShimPlugin(): Plugin {
     name: 'servo-test-asset-shim',
     enforce: 'pre',
     resolveId(source) {
-      if (source.endsWith('.html') || source.endsWith('.wasm')) return '\0servo-shim:' + source;
+      if (source.endsWith('/vendor/servo-worker/worker-adapter.mjs')) {
+        return path.resolve(process.cwd(), 'test/helpers/servo-worker-adapter.ts');
+      }
+      if (source.endsWith('.html') || source.endsWith('.wasm')) {
+        return '\0servo-shim:' + source;
+      }
       return null;
     },
     load(id) {

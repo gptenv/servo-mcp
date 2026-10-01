@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
-import servoWasm from '../servo-wasm/target/wasm32-unknown-unknown/production-stripped/servo_js_wasm.wasm';
-import { createServoWorkerRuntime } from '../servo-wasm/ports/servo-js-wasm/worker-adapter.mjs';
+import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
+import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
 import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
