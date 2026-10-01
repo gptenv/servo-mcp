@@ -51,6 +51,7 @@ jobs:
           python-version-file-path: servo-wasm-source/.python-version
 
       - name: Install Servo build dependencies
+        working-directory: servo-wasm-source
         run: |
           sudo apt update
           sudo apt install --yes clang-19
