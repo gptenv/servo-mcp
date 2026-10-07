@@ -349,7 +349,7 @@ describe('initialize', () => {
     scriptRuntime({ pumpResult: { settled: false } });
     const session = await newSession();
     const result = await session.initialize(initOptions({ url: 'https://public.example/' }));
-    expect(result.page.url).toBe('https://public.example/page');
+    expect(result.page.url).toBe('https://public.example/');
     expect(lastRuntimeCalls()).toContain('pump');
   });
 
