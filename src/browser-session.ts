@@ -6,7 +6,6 @@ import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
-const MAX_TOOL_DURATION_MS = 15_000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
@@ -196,7 +195,6 @@ export const browserSessionOptionsSchema = z.object({
   width: z.number().int().min(320).max(1920).default(1280),
   height: z.number().int().min(240).max(1600).default(720),
   fontBase64: z.string().max(44_739_244).optional(),
-  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
 }).refine((value) => !(value.url && value.html !== undefined), {
   message: 'Provide a URL or inline HTML, not both.',
 });
@@ -262,13 +260,12 @@ function publicWebSocket(url: string, protocols?: string | string[]): WebSocket 
   return new WebSocket(assertPublicWebSocketUrl(url), protocols);
 }
 
-async function pump(runtime: ServoRuntime, maxDurationMs: number): Promise<void> {
-  const result = await runtime.pumpUntilSettled({ maxDurationMs, maxTurns: 2_000, networkIdleMs: 250 });
-  if (!result.settled) throw new Error(`Servo did not settle within ${maxDurationMs} ms.`);
+async function pump(runtime: ServoRuntime): Promise<void> {
+  await runtime.pumpCooperatively({ maxTurns: 2_000 });
 }
 
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
-  const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression, { maxDurationMs: 10_000 }));
+  const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression, ));
   if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
     throw new Error('Servo returned an invalid page summary.');
   }
@@ -277,7 +274,7 @@ async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
 
 async function pageUrl(runtime: ServoRuntime): Promise<string> {
   try {
-    const value = parseEvaluationResult(await runtime.evaluate('location.href', { maxDurationMs: 2_000 }));
+    const value = parseEvaluationResult(await runtime.evaluate('location.href', ));
     if (typeof value === 'string') return value;
   } catch {
     // Fall back to the complete summary for older runtime adapters.
@@ -445,7 +442,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   private async storageProbe(runtime: ServoRuntime, reset: boolean): Promise<StorageProbe | undefined> {
     try {
       const value = parseEvaluationResult(await runtime.evaluate(
-        storageProbeExpression(this.storageProbeKey, reset), { maxDurationMs: 2_000 },
+        storageProbeExpression(this.storageProbeKey, reset), ,
       ));
       if (typeof value !== 'object' || value === null || !('supported' in value) || value.supported !== true
         || !('localStorage' in value) || typeof value.localStorage !== 'boolean'
@@ -747,7 +744,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const temporaryKey = JSON.stringify(temporaryName);
     const setup = parseEvaluationResult(await runtime.evaluate(
       `(()=>{if(location.origin==='null')return JSON.stringify({opaque:true,count:0});const store=globalThis[${JSON.stringify(storageName)}];const keys=[];let chars=0;for(let i=0;i<store.length;i++){const key=store.key(i);if(key!==null){const value=String(store.getItem(key)??'');chars+=key.length+value.length;if(chars>${MAX_WEB_STORAGE_CAPTURE_CHARS})throw new RangeError('${storageName} exceeds the ${MAX_WEB_STORAGE_CAPTURE_CHARS} character snapshot safety limit.');keys.push(key);}}globalThis[${temporaryKey}]=keys;return JSON.stringify({count:keys.length});})()`,
-      { maxDurationMs: 15_000 },
+      ,
     ));
     if (typeof setup !== 'object' || setup === null || !('count' in setup) || typeof setup.count !== 'number') {
       throw new Error(`Servo could not enumerate ${storageName}: ${JSON.stringify(setup).slice(0, 512)}`);
@@ -764,7 +761,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         for (let offset = 0; keyLength === undefined || offset < Math.max(keyLength, valueLength ?? 0); offset += STORAGE_CAPTURE_CHUNK_CHARS) {
           const piece = parseEvaluationResult(await runtime.evaluate(
             `JSON.stringify((()=>{const key=globalThis[${temporaryKey}]?.[${index}];if(typeof key!=='string')throw new Error('Storage changed during snapshot capture.');const value=globalThis[${JSON.stringify(storageName)}].getItem(key);if(value===null)throw new Error('Storage changed during snapshot capture.');return {keyLength:key.length,valueLength:value.length,key:key.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS}),value:value.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS})}})())`,
-            { maxDurationMs: 15_000 },
+            ,
           ));
           if (typeof piece !== 'object' || piece === null || !('key' in piece) || typeof piece.key !== 'string'
             || !('value' in piece) || typeof piece.value !== 'string'
@@ -783,14 +780,14 @@ export class ServoBrowserSession extends DurableObject<Env> {
         entries.push([key, value]);
       }
     } finally {
-      await runtime.evaluate(`delete globalThis[${temporaryKey}]`, { maxDurationMs: 2_000 }).catch(() => undefined);
+      await runtime.evaluate(`delete globalThis[${temporaryKey}]`, ).catch(() => undefined);
     }
     return entries;
   }
 
   private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
-    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB), { maxDurationMs: 15_000 }));
+    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB), ));
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error(`Servo returned invalid browser restore state: ${JSON.stringify(value).slice(0, 512)}`);
     }
@@ -876,13 +873,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false) {
     const result = parseEvaluationResult(await runtime.evaluate(
-      applyResumeState(snapshotForOrigin(snapshot, url)), { maxDurationMs: 15_000 },
+      applyResumeState(snapshotForOrigin(snapshot, url)), ,
     ));
     if (typeof result !== 'object' || result === null || !('restored' in result)) {
       const action = reapplying ? 'reapply' : 'apply';
       throw new Error(`Servo could not ${action} the saved tab state: ${JSON.stringify(result).slice(0, 512)}`);
     }
-    await pump(runtime, 2_000);
+    await pump(runtime);
     return result as { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number };
   }
 
@@ -901,7 +898,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const restored = await this.applySavedState(runtime, snapshot, url);
     if (restored.hasStorage || restored.hasCookies || restored.hasIndexedDBState || restored.indexedDatabases) {
       if (!runtime.reload()) throw new Error('Servo could not reload after restoring this tab origin.');
-      await pump(runtime, 10_000);
+      await pump(runtime);
       await this.applySavedState(runtime, snapshot, url, true);
     }
   }
@@ -952,14 +949,14 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (!loaded) throw new Error('Servo could not reopen the saved tab URL.');
       let restored: { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number } | undefined;
       if (!isBlankDocument) {
-        await pump(runtime, 10_000);
+        await pump(runtime);
         restored = await this.applySavedState(runtime, snapshot, snapshot.url);
       }
       // Give restored storage and script-visible cookies a chance to initialize
       // the re-opened page, as a browser does when restoring a tab profile.
       if (!isInlineDocument && !isBlankDocument && (restored?.hasStorage || restored?.hasCookies || restored?.hasIndexedDBState || restored?.indexedDatabases)) {
         if (!runtime.reload()) throw new Error('Servo could not reload the restored tab.');
-        await pump(runtime, 10_000);
+        await pump(runtime);
         await this.applySavedState(runtime, snapshot, snapshot.url, true);
       }
       await this.storageProbe(runtime, true);
@@ -1124,7 +1121,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         } else if (options.url && !runtime.loadPage(options.url)) {
           throw new Error('Servo rejected the requested URL.');
         }
-        if (options.url || options.html !== undefined) await pump(runtime, options.maxDurationMs);
+        if (options.url || options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
         await this.captureSnapshot(runtime);
         await this.storageProbe(runtime, true);
@@ -1173,23 +1170,23 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
-  async navigate(url: string, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async navigate(url: string): Promise<BrowserActionResult> {
     assertPublicHttpUrl(url);
     return this.operate(async (runtime) => {
       if (!runtime.loadPage(url)) throw new Error('Servo rejected the requested URL.');
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'navigate', page: await this.summary(runtime) };
     });
   }
 
-  async navigateHtml(html: string, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async navigateHtml(html: string): Promise<BrowserActionResult> {
     if (new TextEncoder().encode(html).byteLength > MAX_PERSISTED_HTML_BYTES) {
       throw new RangeError(`Inline HTML exceeds ${MAX_PERSISTED_HTML_BYTES} UTF-8 bytes, the resumable-session limit.`);
     }
     return this.operate(async (runtime) => {
       if (!runtime.loadHtml(html)) throw new Error('Servo rejected the supplied HTML document.');
       await this.storeAsset('initial-html', html);
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'navigate', page: await this.summary(runtime) };
     });
   }
@@ -1198,73 +1195,73 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return this.operate((runtime) => this.summary(runtime));
   }
 
-  async wait(maxDurationMs = 10_000): Promise<PageSummary> {
+  async wait(): Promise<PageSummary> {
     return this.operate(async (runtime) => {
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return this.summary(runtime);
     });
   }
 
-  async evaluate(script: string, maxDurationMs = 10_000): Promise<{ value: unknown; page: PageSummary }> {
+  async evaluate(script: string): Promise<{ value: unknown; page: PageSummary }> {
     if (new TextEncoder().encode(script).byteLength > MAX_SCRIPT_BYTES) throw new RangeError('Script exceeds 64 KiB.');
     return this.operate(async (runtime) => {
-      const value = await runtime.evaluate(script, { maxDurationMs });
+      const value = await runtime.evaluate(script);
       return { value, page: await this.summary(runtime) };
     });
   }
 
-  async click(x: number, y: number, button = 0, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async click(x: number, y: number, button = 0): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.click(x, y, button);
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'click', page: await this.summary(runtime) };
     });
   }
 
-  async typeText(text: string, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async typeText(text: string): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.typeText(text);
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'type', page: await this.summary(runtime) };
     });
   }
 
-  async pressKey(key: string, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async pressKey(key: string): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.pressKey(key);
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'key', page: await this.summary(runtime) };
     });
   }
 
-  async scroll(deltaX: number, deltaY: number, x?: number, y?: number, maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async scroll(deltaX: number, deltaY: number, x?: number, y?: number): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.scrollBy(deltaX, deltaY, { x, y });
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'scroll', page: await this.summary(runtime) };
     });
   }
 
-  async history(direction: 'back' | 'forward', maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async history(direction: 'back' | 'forward'): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       const navigated = direction === 'back' ? runtime.goBack() : runtime.goForward();
-      if (navigated) await pump(runtime, maxDurationMs);
+      if (navigated) await pump(runtime);
       return { action: direction, page: await this.summary(runtime) };
     });
   }
 
-  async reload(maxDurationMs = 10_000): Promise<BrowserActionResult> {
+  async reload(): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       if (!runtime.reload()) throw new Error('Servo could not reload the current page.');
-      await pump(runtime, maxDurationMs);
+      await pump(runtime);
       return { action: 'reload', page: await this.summary(runtime) };
     });
   }
 
-  async screenshot(fullPage = false, maxDurationMs = 5_000): Promise<{ page: PageSummary; png: Uint8Array }> {
+  async screenshot(fullPage = false): Promise<{ page: PageSummary; png: Uint8Array }> {
     return this.operate(async (runtime) => ({
       page: await this.summary(runtime),
-      png: await runtime.screenshot({ fullPage, maxDurationMs }),
+      png: await runtime.screenshot({ fullPage }),
     }));
   }
 
