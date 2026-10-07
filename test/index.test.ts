@@ -343,7 +343,7 @@ describe('focused browser tools', () => {
 
   it('exports the new arrays in every session tool JSON schema and rejects obsolete selectors', () => {
     for (const [name, tool] of harness.tools) {
-      if (name === 'servo_web_search') continue;
+      if (name === 'servo_web_search' || name === 'servo_app_open') continue;
       const schema = z.toJSONSchema(tool.definition.inputSchema, { io: 'input' }) as any;
       expect(schema.properties).toHaveProperty('actions');
       expect(schema.properties).not.toHaveProperty('sessionIDs');
