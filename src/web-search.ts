@@ -12,23 +12,23 @@ export type WebSearchResult = {
 
 function decodeXml(value: string): string {
   return value
-    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
-    .replace(/&#(\\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
 }
 
 function tagValue(item: string, tag: string): string {
-  const match = item.match(new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)</' + tag + '>', 'i'));
+  const match = item.match(new RegExp('<' + tag + '[^>]*>([\s\S]*?)</' + tag + '>', 'i'));
   return decodeXml(match?.[1] ?? '').trim();
 }
 
 export function parseBingRss(xml: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
-  const items = xml.match(/<item[\\s\\S]*?<\\/item>/gi) ?? [];
+  const items = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
   return items.slice(0, limit).map((item) => ({
     title: tagValue(item, 'title'),
     url: tagValue(item, 'link'),
