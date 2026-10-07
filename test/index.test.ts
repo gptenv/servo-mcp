@@ -183,11 +183,11 @@ describe('session management tools', () => {
     expect(result.responses[0].sessionID).not.toBe(result.responses[1].sessionID);
     expect(defaultSession.initialize).toHaveBeenNthCalledWith(1, {
       sessionId: result.responses[0].sessionID, width: 800, height: 600,
-      url: 'https://example.com/', html: undefined, maxDurationMs: 10_000,
+      url: 'https://example.com/', html: undefined,
     });
     expect(defaultSession.initialize).toHaveBeenNthCalledWith(2, {
       sessionId: result.responses[1].sessionID, width: 1280, height: 720,
-      url: undefined, html: '<p>Hi</p>', maxDurationMs: 10_000,
+      url: undefined, html: '<p>Hi</p>',
     });
     expect(defaultSession.navigate).not.toHaveBeenCalled();
     expect(defaultSession.inspect).toHaveBeenCalledTimes(2);
@@ -263,10 +263,10 @@ describe('focused browser tools', () => {
     expect(browsed.responses[0].response.results[0]).toEqual({
       title: 'Example', url: 'https://example.com/', snippet: 'visible page text', content: 'visible page text',
     });
-    expect(defaultSession.navigate).toHaveBeenCalledWith('https://example.com/', 10_000);
-    expect(defaultSession.click).toHaveBeenCalledWith(3, 4, 0, 10_000);
-    expect(defaultSession.scroll).toHaveBeenCalledWith(1, 2, undefined, undefined, 10_000);
-    expect(defaultSession.wait).toHaveBeenCalledWith(1_000);
+    expect(defaultSession.navigate).toHaveBeenCalledWith('https://example.com/');
+    expect(defaultSession.click).toHaveBeenCalledWith(3, 4, 0);
+    expect(defaultSession.scroll).toHaveBeenCalledWith(1, 2, undefined, undefined);
+    expect(defaultSession.wait).toHaveBeenCalledWith();
     expect(defaultSession.registerFont).toHaveBeenCalledWith('Zm9udA==');
   });
 
@@ -375,7 +375,7 @@ describe('focused browser tools', () => {
     expect(structured(await invoke('servo_inspect', browserInput([{ sessionId, width: 800 }]))).responses[0].error)
       .toMatch(/Initial viewport/);
     expect(structured(await invoke('servo_navigate', browserInput([{ sessionId, html: '<p>Updated</p>' }]))).responses[0].ok).toBe(true);
-    expect(defaultSession.navigateHtml).toHaveBeenCalledWith('<p>Updated</p>', 10_000);
+    expect(defaultSession.navigateHtml).toHaveBeenCalledWith('<p>Updated</p>');
   });
 
   it('routes recording start, stop, status, and download tools', async () => {
