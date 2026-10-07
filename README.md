@@ -29,7 +29,9 @@ session created by a status action returns its status; an existing session
 reports runtime availability without forcing a page reload. HTTP actions do
 not allocate browser sessions.
 
+- `servo_web_search`
 - `servo_session_status`
+- `servo_web_search`
 - `servo_navigate`, `servo_reload`, `servo_history`
 - `servo_inspect`, `servo_evaluate`, `servo_get_capabilities`
 - `servo_http_request`, plus `servo_http_get`, `servo_http_post`, `servo_http_put`,
@@ -38,6 +40,8 @@ not allocate browser sessions.
 - `servo_screenshot`, `servo_register_font`
 - `servo_recording_start`, `servo_recording_stop`, `servo_recording_status`,
   `servo_recording_download`
+
+The `servo_web_search` tool searches the public web through Bing's RSS search endpoint and returns ranked title/URL/snippet records. It is intentionally bounded to 10 results and an 8-second upstream timeout; no search API key is required. Search results are discovery data, so use `servo_navigate` to open and inspect the selected pages before relying on their contents.
 
 The HTTP request tools call public HTTP(S) endpoints directly. They accept
 `{ "actions": [{ "url": "https://example.com" }, ...] }` without session IDs
