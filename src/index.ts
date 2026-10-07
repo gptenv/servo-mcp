@@ -134,6 +134,9 @@ function createServer(env: Env, publicOrigin: string) {
   const browserUiMeta = {
     ui: { resourceUri: WIDGET_URI },
     'openai/outputTemplate': WIDGET_URI,
+  };
+  const browserAppUiMeta = {
+    ...browserUiMeta,
     'openai/ui': { entrypoints: [{ type: 'global' }] },
   };
   const searchUiMeta = {
@@ -214,7 +217,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo navigate',
     description: 'Load a public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. Each actions entry has its own load budget; private/local network addresses are blocked.',
     inputSchema: navigateSchema,
-    _meta: browserUiMeta,
+    _meta: browserAppUiMeta,
   }, async (input) => safely(async () => runSessions(input, async (browser, group, created) => {
     // Initialization already loads new tabs; do not execute navigation twice.
     if (created) return withWebResult({ action: 'navigate', page: await browser.inspect() });
