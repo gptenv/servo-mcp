@@ -145,6 +145,12 @@ describe('MCP Worker routes and server registration', () => {
 
     const searchResource = harness.resources.get('servo-web-search-ui')!;
     expect(searchResource.definition.mimeType).toBe('text/html;profile=mcp-app');
+    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search.html');
+    for (const [name, tool] of harness.tools) {
+      if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser.html');
+    }
+    expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']?.entrypoints?.[0]?.type).toBe('global');
+    expect(registeredTool('servo_inspect').definition._meta?.['openai/ui']).toBeUndefined();
     const searchWidget = await searchResource.handler(new URL('ui://servo/search.html'));
     expect(searchWidget.contents[0].text).toContain('Search Google, Bing, DuckDuckGo, and Yandex');
 
