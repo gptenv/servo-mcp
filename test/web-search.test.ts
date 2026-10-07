@@ -5,7 +5,7 @@ describe('search parsers', () => {
   it('parses Bing RSS and decodes XML entities', () => {
     const xml = '<rss><channel><item><title><![CDATA[Servo &amp; WASM]]></title><link>https://example.com/a?x=1&amp;y=2</link><description>A &lt;b&gt;browser&lt;/b&gt; &#39;result&#39;</description></item></channel></rss>';
     expect(parseBingRss(xml)).toEqual([
-      { title: 'Servo & WASM', url: 'https://example.com/a?x=1&y=2', snippet: "A <b>browser</b> 'result'", provider: 'bing' },
+      { title: 'Servo & WASM', url: 'https://example.com/a?x=1&y=2', snippet: "A browser 'result'", provider: 'bing' },
     ]);
   });
 
