@@ -146,7 +146,7 @@ describe('MCP Worker routes and server registration', () => {
     const searchResource = harness.resources.get('servo-web-search-ui')!;
     expect(searchResource.definition.mimeType).toBe('text/html;profile=mcp-app');
     const searchWidget = await searchResource.handler(new URL('ui://servo/search.html'));
-    expect(searchWidget.contents[0].text).toContain('Servo web search');
+    expect(searchWidget.contents[0].text).toContain('Search Google, Bing, DuckDuckGo, and Yandex');
 
     const browserResource = harness.resources.get('servo-browser-ui')!;
     const widget = await browserResource.handler(new URL('ui://servo/browser.html'));
