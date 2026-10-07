@@ -54,7 +54,10 @@ function parseGoogleHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[]
   for (const match of html.matchAll(pattern)) {
     const rawUrl = decodeUrl(match[1]);
     const url = rawUrl.startsWith('/url?') ? new URL(rawUrl, 'https://www.google.com').searchParams.get('q') ?? '' : rawUrl;
-    if (!url || !/^https?:\/\//i.test(url) || /google\./i.test(new URL(url).hostname)) continue;
+    if (!url || !/^https?:\/\//i.test(url)) continue;
+    let hostname: string;
+    try { hostname = new URL(url).hostname; } catch { continue; }
+    if (/google\./i.test(hostname)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
     results.push({ title: decodeHtml(match[2]), url, snippet: '', provider: 'google' });
@@ -68,7 +71,10 @@ function parseDuckDuckGoHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResu
   const pattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?:<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>)/gi;
   for (const match of html.matchAll(pattern)) {
     const url = decodeUrl(match[1]);
-    if (!/^https?:\/\//i.test(url) || /duckduckgo\./i.test(new URL(url).hostname)) continue;
+    if (!/^https?:\/\//i.test(url)) continue;
+    let hostname: string;
+    try { hostname = new URL(url).hostname; } catch { continue; }
+    if (/duckduckgo\./i.test(hostname)) continue;
     results.push({ title: decodeHtml(match[2]), url, snippet: decodeHtml(match[4] ?? match[5] ?? ''), provider: 'duckduckgo' });
     if (results.length >= limit) break;
   }
@@ -82,7 +88,10 @@ function parseYandexHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[]
   for (const match of html.matchAll(pattern)) {
     const url = decodeUrl(match[1]);
     const title = decodeHtml(match[2]);
-    if (!title || title.length < 2 || /yandex\./i.test(new URL(url).hostname)) continue;
+    if (!title || title.length < 2) continue;
+    let hostname: string;
+    try { hostname = new URL(url).hostname; } catch { continue; }
+    if (/yandex\./i.test(hostname)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
     results.push({ title, url, snippet: '', provider: 'yandex' });
