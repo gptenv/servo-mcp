@@ -7,7 +7,7 @@
   :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
   body { margin: 0; padding: 16px; }
   form { display: flex; gap: 8px; }
-  input, button { font: inherit; padding: 8px; }
+  input, select, button { font: inherit; padding: 8px; }
   input { flex: 1; min-width: 0; }
   button { cursor: pointer; }
   #status { min-height: 1.5em; }
@@ -19,7 +19,7 @@
 <main>
   <h1>Servo web search</h1>
   <form id="search-form">
-    <select id="provider"><option value="auto">Auto (all engines)</option><option value="google">Google</option><option value="bing">Bing</option><option value="duckduckgo">DuckDuckGo</option><option value="yandex">Yandex</option><option value="all">All engines</option></select>\n    <input id="query" type="search" placeholder="Search the web" autocomplete="off" required>
+    <select id="provider"><option value="auto">Auto (all engines)</option><option value="google">Google</option><option value="bing">Bing</option><option value="duckduckgo">DuckDuckGo</option><option value="yandex">Yandex</option><option value="all">All engines</option></select>    <input id="query" type="search" placeholder="Search the web" autocomplete="off" required>
     <button>Search</button>
   </form>
   <p id="status" role="status"></p>
@@ -47,7 +47,7 @@
     }
     if (message.method === 'ui/notifications/tool-input') {
       const input = message.params?.arguments ?? message.params;
-      if (input?.query) document.querySelector('#query').value = input.query;
+      if (input?.query) document.querySelector('#query').value = input.query;\n      if (input?.provider) document.querySelector('#provider').value = input.provider;
     }
     if (message.method === 'ui/notifications/tool-result') render(message.params?.structuredContent);
   });
@@ -80,7 +80,7 @@
     try {
       const result = await call('tools/call', {
         name: 'servo_web_search',
-        arguments: { query: document.querySelector('#query').value }
+        arguments: { query: document.querySelector('#query').value, provider: document.querySelector('#provider').value, limit: 8 }
       });
       if (result.isError) throw new Error(result.content?.[0]?.text || 'Search failed.');
       render(result.structuredContent);
