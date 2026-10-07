@@ -44,7 +44,7 @@ describe('searchWeb', () => {
   it('queries all providers in auto mode and tolerates individual failures', async () => {
     const fetchMock = vi.fn(async (url: URL) => {
       if (url.hostname === 'www.google.com') {
-        return new Response('<html><a href="/url?q=https%3A%2F%2Fgoogle.example"><h3>Google result</h3></a></html>', { status: 200 });
+        return new Response('<html><a href="/url?q=https%3A%2F%2Fexample.com%2Fgoogle-result"><h3>Google result</h3></a></html>', { status: 200 });
       }
       if (url.hostname === 'www.bing.com') {
         return new Response('<rss><channel><item><title>Bing result</title><link>https://bing.example</link><description>Bing</description></item></channel></rss>', { status: 200 });
