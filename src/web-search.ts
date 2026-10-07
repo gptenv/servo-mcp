@@ -47,8 +47,10 @@ function parseBingRss(xml: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
 function parseGoogleHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const seen = new Set<string>();
-  const pattern = /<a[^>]+href="([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>[\s\S]*?<\/a>/gi;
+  const pattern = /<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   for (const match of html.matchAll(pattern)) {
+    const titleMatch = match[2].match(/<h3\b[^>]*>([\s\S]*?)<\/h3>/i);
+    if (!titleMatch) continue;
     const rawUrl = decodeUrl(match[1]);
     const url = rawUrl.startsWith('/url?') ? new URL(rawUrl, 'https://www.google.com').searchParams.get('q') ?? '' : rawUrl;
     if (!url || !/^https?:\/\//i.test(url)) continue;
@@ -57,12 +59,11 @@ function parseGoogleHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[]
     if (/google\./i.test(hostname)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
-    results.push({ title: decodeHtml(match[2]), url, snippet: '', provider: 'google' });
+    results.push({ title: decodeHtml(titleMatch[1]), url, snippet: '', provider: 'google' });
     if (results.length >= limit) break;
   }
   return results;
 }
-
 function parseDuckDuckGoHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const pattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?:<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>)/gi;
