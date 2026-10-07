@@ -42,11 +42,18 @@ describe('searchWeb', () => {
   });
 
   it('queries all providers in auto mode and tolerates individual failures', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response('<html><a href="/url?q=https%3A%2F%2Fgoogle.example"><h3>Google result</h3></a></html>', { status: 200 }))
-      .mockResolvedValueOnce(new Response('<rss><channel><item><title>Bing result</title><link>https://bing.example</link><description>Bing</description></item></channel></rss>', { status: 200 }))
-      .mockResolvedValueOnce(new Response('<a class="result__a" href="https://ddg.example">DDG result</a><div class="result__snippet">DDG</div>', { status: 200 }))
-      .mockResolvedValueOnce(new Response('nope', { status: 503 }));
+    const fetchMock = vi.fn(async (url: URL) => {
+      if (url.hostname === 'www.google.com') {
+        return new Response('<html><a href="/url?q=https%3A%2F%2Fgoogle.example"><h3>Google result</h3></a></html>', { status: 200 });
+      }
+      if (url.hostname === 'www.bing.com') {
+        return new Response('<rss><channel><item><title>Bing result</title><link>https://bing.example</link><description>Bing</description></item></channel></rss>', { status: 200 });
+      }
+      if (url.hostname === 'html.duckduckgo.com') {
+        return new Response('<a class="result__a" href="https://ddg.example">DDG result</a><div class="result__snippet">DDG</div>', { status: 200 });
+      }
+      return new Response('nope', { status: 503 });
+    });
     vi.stubGlobal('fetch', fetchMock);
     const result = await searchWeb('servo wasm', 8, 'auto');
     expect(result.results.map((item) => item.provider)).toEqual(['google', 'bing', 'duckduckgo']);
