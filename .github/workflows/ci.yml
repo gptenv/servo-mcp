@@ -111,9 +111,7 @@ jobs:
 
       - name: Test the Worker adapter and WASM
         working-directory: servo-wasm-source/ports/servo-js-wasm
-        run: |
-          npm ci
-          npm test
+        run: npm test
 
       - name: Assemble and verify the deployment package
         working-directory: servo-wasm-source/ports/servo-js-wasm
