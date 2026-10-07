@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Servo web search</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
+  body { margin: 0; padding: 16px; }
+  form { display: flex; gap: 8px; }
+  input, button { font: inherit; padding: 8px; }
+  input { flex: 1; min-width: 0; }
+  button { cursor: pointer; }
+  #status { min-height: 1.5em; }
+  ol { padding-left: 1.4rem; }
+  li { margin: 0 0 12px; }
+  a { font-weight: 600; }
+  .snippet { margin: 3px 0 0; opacity: .85; }
+</style>
+<main>
+  <h1>Servo web search</h1>
+  <form id="search-form">
+    <input id="query" type="search" placeholder="Search the web" autocomplete="off" required>
+    <button>Search</button>
+  </form>
+  <p id="status" role="status"></p>
+  <ol id="results"></ol>
+</main>
+<script>
+  const pending = new Map();
+  let nextId = 1;
+  function call(method, params) {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+    });
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+    if (message.id !== undefined && pending.has(message.id)) {
+      const request = pending.get(message.id);
+      pending.delete(message.id);
+      message.error ? request.reject(message.error) : request.resolve(message.result);
+      return;
+    }
+    if (message.method === 'ui/notifications/tool-input') {
+      const input = message.params?.arguments ?? message.params;
+      if (input?.query) document.querySelector('#query').value = input.query;
+    }
+    if (message.method === 'ui/notifications/tool-result') render(message.params?.structuredContent);
+  });
+  function render(result) {
+    const list = document.querySelector('#results');
+    list.replaceChildren();
+    if (!result) return;
+    const results = result.results ?? [];
+    document.querySelector('#status').textContent = results.length
+      ? results.length + ' result' + (results.length === 1 ? '' : 's')
+      : 'No results found.';
+    for (const item of results) {
+      const li = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = item.url;
+      link.textContent = item.title;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      const snippet = document.createElement('p');
+      snippet.className = 'snippet';
+      snippet.textContent = item.snippet || '';
+      li.append(link, snippet);
+      list.append(li);
+    }
+  }
+  document.querySelector('#search-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const status = document.querySelector('#status');
+    status.textContent = 'Searching…';
+    try {
+      const result = await call('tools/call', {
+        name: 'servo_web_search',
+        arguments: { query: document.querySelector('#query').value }
+      });
+      if (result.isError) throw new Error(result.content?.[0]?.text || 'Search failed.');
+      render(result.structuredContent);
+    } catch (error) {
+      status.textContent = String(error?.message ?? error);
+    }
+  });
+</script>
+</html>
