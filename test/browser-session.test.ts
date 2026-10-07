@@ -91,7 +91,7 @@ function seedAsset(db: FakeDurableObjectState['storage']['sql'], name: string, t
 /** Options as the MCP layer always sends them (schema defaults applied). */
 function initOptions(extra: Record<string, unknown> = {}) {
   return {
-    sessionId: UUID, width: 1280, height: 720, maxDurationMs: 10_000, ...extra,
+    sessionId: UUID, width: 1280, height: 720, ...extra,
   } as never;
 }
 
@@ -141,21 +141,19 @@ afterEach(() => {
 });
 
 describe('browserSessionOptionsSchema', () => {
-  it('applies viewport and budget defaults', () => {
+  it('applies viewport defaults', () => {
     const parsed = mod.browserSessionOptionsSchema.parse({ sessionId: UUID });
     expect(parsed.width).toBe(1280);
     expect(parsed.height).toBe(720);
-    expect(parsed.maxDurationMs).toBe(10_000);
   });
 
   it('rejects combining a URL with inline HTML', () => {
     expect(mod.browserSessionOptionsSchema.safeParse({ sessionId: UUID, url: 'https://a.example/', html: '<p></p>' }).success).toBe(false);
   });
 
-  it('rejects out-of-range viewports, budgets, and malformed ids', () => {
+  it('rejects out-of-range viewports and malformed ids', () => {
     expect(mod.browserSessionOptionsSchema.safeParse({ sessionId: UUID, width: 100 }).success).toBe(false);
     expect(mod.browserSessionOptionsSchema.safeParse({ sessionId: UUID, height: 100 }).success).toBe(false);
-    expect(mod.browserSessionOptionsSchema.safeParse({ sessionId: UUID, maxDurationMs: 20_000 }).success).toBe(false);
     expect(mod.browserSessionOptionsSchema.safeParse({ sessionId: 'not-a-uuid' }).success).toBe(false);
   });
 });
@@ -347,11 +345,14 @@ describe('initialize', () => {
     await expect(session.initialize(initOptions({ url: 'https://public.example/' }))).rejects.toThrow(/rejected the requested URL/);
   });
 
-  it('propagates pump timeouts during initial load', async () => {
+  it('processes an initial load cooperatively without requiring idle settlement', async () => {
     scriptRuntime({ pumpResult: { settled: false } });
     const session = await newSession();
-    await expect(session.initialize(initOptions({ url: 'https://public.example/' }))).rejects.toThrow(/did not settle within 10000 ms/);
+    const result = await session.initialize(initOptions({ url: 'https://public.example/' }));
+    expect(result.page.url).toBe('https://public.example/page');
+    expect(lastRuntimeCalls()).toContain('pump');
   });
+
 
   it('propagates evaluation failures while summarizing the initial page', async () => {
     scriptRuntime({
@@ -721,13 +722,13 @@ describe('operate lifecycle', () => {
 
   it('loads inline HTML into an existing tab and persists its replacement source', async () => {
     const session = await activeSession({ summary: { url: 'https://servo-inline.invalid/' } });
-    const result = await session.navigateHtml('<p>Replacement</p>', 100);
+    const result = await session.navigateHtml('<p>Replacement</p>');
     expect(result.action).toBe('navigate');
     expect(lastRuntimeCalls()).toContain('loadHtml:<p>Replacement</p>');
     expect(sql().table('browser_asset')!.rows.some((row) => row.name === 'initial-html' && row.chunk_text === '<p>Replacement</p>')).toBe(true);
     await expect(session.navigateHtml('é'.repeat(524289))).rejects.toThrow(/UTF-8 bytes/);
     createdRuntimes.at(-1).options.loadHtmlReturns = false;
-    await expect(session.navigateHtml('<p>Rejected</p>', 100)).rejects.toThrow(/rejected the supplied HTML/);
+    await expect(session.navigateHtml('<p>Rejected</p>')).rejects.toThrow(/rejected the supplied HTML/);
   });
 
   it('reports when Servo rejects a navigate request', async () => {
@@ -739,9 +740,9 @@ describe('operate lifecycle', () => {
     const png = new Uint8Array([9, 8, 7]);
     const session = await activeSession({ summary: { url: 'https://public.example/page', title: 'P', text: 'T' }, screenshotPng: png, capabilitiesValue: { ok: 1 } });
     expect(await session.inspect()).toEqual({ url: 'https://public.example/page', title: 'P', text: 'T' });
-    expect((await session.wait(500)).title).toBe('P');
+    expect((await session.wait()).title).toBe('P');
     expect((await session.click(10, 20)).action).toBe('click');
-    expect((await session.click(10, 20, 2, 500)).action).toBe('click');
+    expect((await session.click(10, 20, 2)).action).toBe('click');
     expect((await session.typeText('hello')).action).toBe('type');
     expect((await session.pressKey('Enter')).action).toBe('key');
     expect((await session.scroll(0, 100)).action).toBe('scroll');
@@ -751,7 +752,7 @@ describe('operate lifecycle', () => {
     expect((await session.reload()).action).toBe('reload');
     const shot = await session.screenshot();
     expect(shot.png).toBe(png);
-    expect((await session.screenshot(true, 1000)).page.title).toBe('P');
+    expect((await session.screenshot(true)).page.title).toBe('P');
     expect(await session.capabilities()).toEqual({ ok: 1 });
     const calls = lastRuntimeCalls();
     expect(calls).toContain('click:10:20:0');
@@ -812,7 +813,7 @@ describe('operate lifecycle', () => {
 
   it('surfaces pump failures during operations', async () => {
     const session = await activeSession({ pumpThrows: new Error('pump died') });
-    await expect(session.wait(100)).rejects.toThrow('pump died');
+    await expect(session.wait()).rejects.toThrow('pump died');
   });
 
   it('registers fonts and assigns sequential asset names', async () => {
@@ -845,7 +846,7 @@ describe('operate lifecycle', () => {
       internal.runtime = null;
       return { settled: true };
     };
-    await expect(session.wait(100)).resolves.toMatchObject({ title: expect.any(String) });
+    await expect(session.wait()).resolves.toMatchObject({ title: expect.any(String) });
     expect(internal.runtime).toBeNull();
     internal.runtime = originalRuntime;
 
@@ -853,13 +854,13 @@ describe('operate lifecycle', () => {
       sql().table('browser_session')!.rows[0].status = 'closed';
       return { settled: true };
     };
-    await expect(session.wait(100)).resolves.toMatchObject({ title: expect.any(String) });
+    await expect(session.wait()).resolves.toMatchObject({ title: expect.any(String) });
     expect(sql().table('browser_session')!.rows[0].status).toBe('closed');
   });
 
   it('serializes concurrent operations onto one queue', async () => {
     const session = await activeSession({ summary: { url: 'https://public.example/page' } });
-    const [a, b, c] = await Promise.all([session.inspect(), session.wait(100), session.inspect()]);
+    const [a, b, c] = await Promise.all([session.inspect(), session.wait(), session.inspect()]);
     expect(a.url).toBe('https://public.example/page');
     expect(b.url).toBe('https://public.example/page');
     expect(c.url).toBe('https://public.example/page');
