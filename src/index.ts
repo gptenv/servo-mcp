@@ -93,7 +93,7 @@ function errorResult(error: unknown) {
 }
 
 function createServer(env: Env, publicOrigin: string) {
-  const server = new McpServer({ name: 'servo-mcp', version: '0.4.0' }, {
+  const server = new McpServer({ name: 'servo-mcp', version: '0.5.0' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Omit sessionID or use a falsy value on an action to create a new tab automatically and perform that action. There is no standalone session creation tool. Keep a mapping from a short description to its returned sessionID, and pass that exact ID on the action as sessionID for later operations. Every tool returns an ordered top-level responses array with one response object per action, plus metadata counts for all actions. Each focused browser tool runs its action entries concurrently. Sessions expire automatically after 30 days without use.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
@@ -134,6 +134,7 @@ function createServer(env: Env, publicOrigin: string) {
   const browserUiMeta = {
     ui: { resourceUri: WIDGET_URI },
     'openai/outputTemplate': WIDGET_URI,
+    'openai/ui': { entrypoints: [{ type: 'global' }] },
   };
   const searchUiMeta = {
     ui: { resourceUri: SEARCH_WIDGET_URI },
@@ -142,15 +143,17 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_web_search', {
     title: 'Servo web search',
-    description: 'Search the public web for current information. Returns ranked results with title, URL, and a concise snippet. Use this before browsing when you need to discover relevant pages; use servo_navigate to open a result.',
+    description: 'Search the public web across Google, Bing, DuckDuckGo, and Yandex. The auto/all modes query providers in parallel, tolerate individual provider failures, and deduplicate results. Use this before browsing when you need to discover relevant pages; use servo_navigate to open a result.',
     inputSchema: z.object({
       query: z.string().trim().min(1).max(512),
       limit: z.number().int().min(1).max(10).default(8),
+      provider: z.enum(['auto', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
     }).strict(),
     _meta: searchUiMeta,
-  }, async ({ query, limit }) => safely(async () => ({
+  }, async ({ query, limit, provider }) => safely(async () => ({
     query,
-    results: await searchWeb(query, limit),
+    provider,
+    ...(await searchWeb(query, limit, provider)),
   })));
 
   type SessionGroup = { width?: number; height?: number };
@@ -204,6 +207,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo session status',
     description: 'Check browser sessions in parallel with an actions array of objects, each carrying an optional sessionID. Returns one ordered response object per action; runtimeAvailable=false with resumable=true is normal after runtime eviction.',
     inputSchema: multiSession({}),
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser) => browser.getStatus())));
 
   server.registerTool('servo_navigate', {
@@ -261,48 +265,56 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo evaluate',
     description: 'Evaluate a JavaScript expression in each selected page in parallel. Every entry carries its own script and budget. If the script returns a promise, it is awaited within the budget. Each action returns a response with a WebDriver-style JSON clone, such as {"Ok":{"String":"…"}} or {"Err":…}; return JSON.stringify(value) for complex data. Scripts can modify pages or cause external effects.',
     inputSchema: evaluateSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.evaluate(group.script, group.maxDurationMs))));
 
   server.registerTool('servo_click', {
     title: 'Servo click',
     description: 'Click different device-pixel coordinates in multiple selected tabs in parallel. Ground each entry’s coordinates in that tab’s screenshot or measured DOM bounds. Clicks can submit forms or trigger page actions.',
     inputSchema: clickSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.click(group.x, group.y, group.button, group.maxDurationMs))));
 
   server.registerTool('servo_type_text', {
     title: 'Servo type text',
     description: 'Type per-session text into each selected tab’s currently focused control in parallel. Focus the intended fields first. Typing can trigger live search, autosave, or other page effects.',
     inputSchema: typeTextSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.typeText(group.text, group.maxDurationMs))));
 
   server.registerTool('servo_press_key', {
     title: 'Servo press key',
     description: 'Press a key in multiple selected tabs in parallel. Each entry has its own key. Focus intended controls first; Enter may submit forms.',
     inputSchema: keySchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.pressKey(group.key, group.maxDurationMs))));
 
   server.registerTool('servo_scroll', {
     title: 'Servo scroll',
     description: 'Scroll multiple selected tabs in parallel. Each entry has its own pixel deltas and optional viewport point.',
     inputSchema: scrollSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.scroll(group.deltaX, group.deltaY, group.x, group.y, group.maxDurationMs))));
 
   server.registerTool('servo_history', {
     title: 'Servo history',
     description: 'Move multiple selected tabs backward or forward in their live Servo history. Each entry chooses its own direction. History is not part of the restore snapshot and resets after the runtime is discarded.',
     inputSchema: historySchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.history(group.direction, group.maxDurationMs))));
 
   server.registerTool('servo_reload', {
     title: 'Servo reload',
     description: 'Reload multiple selected tabs in parallel and wait for each page to settle.',
     inputSchema: multiSession({ maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) }),
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.reload(group.maxDurationMs))));
 
   server.registerTool('servo_wait', {
     title: 'Servo wait',
     description: 'Let multiple selected pages process browser timers and pending network work in parallel, using each entry’s own time budget.',
     inputSchema: waitSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.wait(group.maxDurationMs))));
 
   server.registerTool('servo_screenshot', {
@@ -324,6 +336,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo recording start',
     description: 'Start asynchronous screen recording with an actions array of objects, each carrying an optional sessionID. Captures a downscaled viewport as H.264 MP4 at 1–3 fps, without audio. The Durable Object remains active during recording; the default maximum is 30 seconds and the hard limit is 60 seconds. Returns a recordingId for stop, status, and download calls.',
     inputSchema: recordingStartSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) =>
     browser.startScreenRecording(group.fps, group.maxDurationSeconds),
   )));
@@ -332,6 +345,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo recording stop',
     description: 'Stop a screen recording with an actions array of objects, each carrying an optional sessionID. Returns immediately with the encoding status; use servo_recording_status to check completion.',
     inputSchema: recordingIdSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) =>
     browser.stopScreenRecording(group.recordingId),
   )));
@@ -340,6 +354,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo recording status',
     description: 'Check recordings with an actions array of objects, each carrying an optional sessionID. Poll this tool after stop until the status is ready.',
     inputSchema: recordingIdSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) =>
     browser.getScreenRecordingStatus(group.recordingId),
   )));
@@ -348,6 +363,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo recording download',
     description: 'Return MP4 download information for an actions array of objects, each carrying an optional sessionID. If status is still encoding, check again later. Download links expire after 24 hours.',
     inputSchema: recordingIdSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, async (browser, group) => {
     const info = await browser.getScreenRecordingDownloadInfo(group.recordingId);
     const downloadUrl = info.downloadToken
@@ -368,12 +384,14 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo register font',
     description: 'Register per-session base64-encoded TTF/OTF/TTC/OTC fonts with an actions array of objects, each carrying an optional sessionID. Register before navigating to pages that need them.',
     inputSchema: registerFontSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.registerFont(group.fontBase64))));
 
   server.registerTool('servo_get_capabilities', {
     title: 'Servo get capabilities',
     description: 'Return Cloudflare WASM Worker capabilities for an actions array of objects, each carrying an optional sessionID. The report distinguishes supported, partial, unsupported, and unverified features; unsupportedReasons explains known port constraints. It does not describe every feature in Servo native builds.',
     inputSchema: capabilitiesSchema,
+    _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser) => browser.capabilities())));
 
   return server;
