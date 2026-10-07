@@ -3,32 +3,32 @@ const MAX_LIMIT = 10;
 const MAX_QUERY_LENGTH = 512;
 const SEARCH_TIMEOUT_MS = 8_000;
 
-export const SEARCH_PROVIDERS = ['google', 'bing', 'duckduckgo', 'yandex', 'all'] as const;
+export const SEARCH_PROVIDERS = ['auto', 'google', 'bing', 'duckduckgo', 'yandex', 'all'] as const;
 export type SearchProvider = typeof SEARCH_PROVIDERS[number];
 
 export type WebSearchResult = {
   title: string;
   url: string;
   snippet: string;
-  provider: Exclude<SearchProvider, 'all'>;
+  provider: Exclude<SearchProvider, 'auto' | 'all'>;
 };
 
-type Provider = Exclude<SearchProvider, 'all'>;
+type Provider = Exclude<SearchProvider, 'auto' | 'all'>;
 
 function decodeHtml(value: string): string {
   return value
-    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')
-    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')
-    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
-    .replace(/&#(\\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
-    .replace(/\\s+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -38,23 +38,23 @@ function decodeUrl(value: string): string {
 }
 
 function parseBingRss(xml: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
-  const items = xml.match(/<item[\\s\\S]*?<\\/item>/gi) ?? [];
+  const items = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
   return items.slice(0, limit).map((item) => ({
-    title: decodeHtml((item.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i)?.[1] ?? '')),
-    url: decodeUrl(item.match(/<link[^>]*>([\\s\\S]*?)<\\/link>/i)?.[1] ?? ''),
-    snippet: decodeHtml(item.match(/<description[^>]*>([\\s\\S]*?)<\\/description>/i)?.[1] ?? ''),
+    title: decodeHtml((item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '')),
+    url: decodeUrl(item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] ?? ''),
+    snippet: decodeHtml(item.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] ?? ''),
     provider: 'bing' as const,
-  })).filter((result) => result.title && /^https?:\\/\\//i.test(result.url));
+  })).filter((result) => result.title && /^https?:\/\//i.test(result.url));
 }
 
 function parseGoogleHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const seen = new Set<string>();
-  const pattern = /<a[^>]+href="([^"]+)"[^>]*>[\\s\\S]*?<h3[^>]*>([\\s\\S]*?)<\\/h3>[\\s\\S]*?<\\/a>/gi;
+  const pattern = /<a[^>]+href="([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>[\s\S]*?<\/a>/gi;
   for (const match of html.matchAll(pattern)) {
     const rawUrl = decodeUrl(match[1]);
     const url = rawUrl.startsWith('/url?') ? new URL(rawUrl, 'https://www.google.com').searchParams.get('q') ?? '' : rawUrl;
-    if (!url || !/^https?:\\/\\//i.test(url) || /google\\./i.test(new URL(url).hostname)) continue;
+    if (!url || !/^https?:\/\//i.test(url) || /google\./i.test(new URL(url).hostname)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
     results.push({ title: decodeHtml(match[2]), url, snippet: '', provider: 'google' });
@@ -65,10 +65,10 @@ function parseGoogleHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[]
 
 function parseDuckDuckGoHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
   const results: WebSearchResult[] = [];
-  const pattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\\s\\S]*?)<\\/a>([\\s\\S]*?)(?:<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\\s\\S]*?)<\\/a>|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\\s\\S]*?)<\\/div>)/gi;
+  const pattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?:<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>)/gi;
   for (const match of html.matchAll(pattern)) {
     const url = decodeUrl(match[1]);
-    if (!/^https?:\\/\\//i.test(url) || /duckduckgo\\./i.test(new URL(url).hostname)) continue;
+    if (!/^https?:\/\//i.test(url) || /duckduckgo\./i.test(new URL(url).hostname)) continue;
     results.push({ title: decodeHtml(match[2]), url, snippet: decodeHtml(match[4] ?? match[5] ?? ''), provider: 'duckduckgo' });
     if (results.length >= limit) break;
   }
@@ -78,11 +78,11 @@ function parseDuckDuckGoHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResu
 function parseYandexHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const seen = new Set<string>();
-  const pattern = /<a[^>]+href="(https?:\\/\\/[^"]+)"[^>]*>([\\s\\S]*?)<\\/a>/gi;
+  const pattern = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   for (const match of html.matchAll(pattern)) {
     const url = decodeUrl(match[1]);
     const title = decodeHtml(match[2]);
-    if (!title || title.length < 2 || /yandex\\./i.test(new URL(url).hostname)) continue;
+    if (!title || title.length < 2 || /yandex\./i.test(new URL(url).hostname)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
     results.push({ title, url, snippet: '', provider: 'yandex' });
@@ -137,7 +137,7 @@ export function dedupeResults(results: WebSearchResult[], limit = DEFAULT_LIMIT)
   const seen = new Set<string>();
   const unique: WebSearchResult[] = [];
   for (const result of results) {
-    const key = result.url.replace(/#.*$/, '').replace(/\\/$/, '');
+    const key = result.url.replace(/#.*$/, '').replace(/\/$/, '');
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(result);
