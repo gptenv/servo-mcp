@@ -10,7 +10,6 @@ import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } f
 
 const WIDGET_URI = 'ui://servo/browser.html';
 const SEARCH_WIDGET_URI = 'ui://servo/search.html';
-const MAX_TOOL_DURATION_MS = 15_000;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
 
@@ -25,25 +24,21 @@ const multiSession = <T extends z.ZodRawShape>(shape: T) => z.object({
 const navigateSchema = multiSession({
   url: z.string().url().max(2048).optional(),
   html: z.string().max(1 * 1024 * 1024).optional(),
-  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
-});
-const evaluateSchema = multiSession({ script: z.string().max(MAX_SCRIPT_BYTES), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+  });
+const evaluateSchema = multiSession({ script: z.string().max(MAX_SCRIPT_BYTES) });
 const clickSchema = multiSession({
   x: z.number().finite(), y: z.number().finite(), button: z.number().int().min(0).max(4).default(0),
-  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
-});
-const typeTextSchema = multiSession({ text: z.string().max(4096), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
-const keySchema = multiSession({ key: z.string().min(1).max(64), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+  });
+const typeTextSchema = multiSession({ text: z.string().max(4096) });
+const keySchema = multiSession({ key: z.string().min(1).max(64) });
 const scrollSchema = multiSession({
   deltaX: z.number().finite(), deltaY: z.number().finite(), x: z.number().finite().optional(), y: z.number().finite().optional(),
-  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000),
-});
-const historySchema = multiSession({ direction: z.enum(['back', 'forward']), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) });
+  });
+const historySchema = multiSession({ direction: z.enum(['back', 'forward']) });
 const waitSchema = multiSession({
-  maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(1_000),
-});
+  });
 const screenshotSchema = multiSession({
-  fullPage: z.boolean().default(false), maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(5_000),
+  fullPage: z.boolean().default(false),
 });
 const recordingStartSchema = multiSession({
   fps: z.number().int().min(1).max(3).default(2),
@@ -98,7 +93,7 @@ function createServer(env: Env, publicOrigin: string) {
       'Each Servo session is one independent browser tab. Omit sessionID or use a falsy value on an action to create a new tab automatically and perform that action. There is no standalone session creation tool. Keep a mapping from a short description to its returned sessionID, and pass that exact ID on the action as sessionID for later operations. Every tool returns an ordered top-level responses array with one response object per action, plus metadata counts for all actions. Each focused browser tool runs its action entries concurrently. Sessions expire automatically after 30 days without use.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
       'Screen recordings capture the viewport as low-frame-rate H.264 MP4 without audio. Start with servo_recording_start, browse while it records, stop with servo_recording_stop, check asynchronous encoding with servo_recording_status, then get a direct download link with servo_recording_download. The Durable Object stays active while a recording is running, which can add duration charges; recordings default to 2 fps and 30 seconds and are capped at 3 fps and 60 seconds. Up to three completed recordings per tab are kept for 24 hours. Download URLs are bearer links; do not share them.',
-      'Each tool keeps one focused purpose. Every browser action accepts an actions array of objects, each with an optional sessionID; servo_navigate actions contain {url,maxDurationMs} and servo_click actions contain independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident. Supplied IDs must already exist; unknown, closed, or expired IDs are never replaced with new tabs. Initial width and height options apply only when an action has no truthy sessionID. Status accepts the same arrays and reports whether existing runtimes are available; HTTP tools do not use browser sessions.',
+      'Each tool keeps one focused purpose. Every browser action accepts an actions array of objects, each with an optional sessionID; servo_navigate actions contain a URL or inline HTML and servo_click actions contain independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident. Supplied IDs must already exist; unknown, closed, or expired IDs are never replaced with new tabs. Initial width and height options apply only when an action has no truthy sessionID. Status accepts the same arrays and reports whether existing runtimes are available; HTTP tools do not use browser sessions.',
       'Snapshots preserve the current URL, viewport, scroll position, common form values, every localStorage and sessionStorage entry, the full cookie jar including HttpOnly cookies, IndexedDB schemas and records for each visited origin, and registered fonts. Restoring reloads the page so page scripts run again; JavaScript heap state, browser history, and arbitrary in-memory DOM/application state are not restored. Cache Storage remains runtime-local and incomplete. Sessions expire after 30 days without use.',
       'A sessionId is a bearer capability because this public MCP server currently has no authentication. Do not share it. Only navigate to public HTTP(S) pages; private/local network targets are blocked.',
       'servo_click, servo_type_text, servo_press_key, and servo_evaluate may cause page-side effects. Use them only for actions the user requested, and do not repeat a call merely because its response was unclear.',
@@ -174,7 +169,7 @@ function createServer(env: Env, publicOrigin: string) {
   const runSessions = async <T extends SessionGroup, R>(
     input: SessionInput<T & { sessionID?: string | null | false | 0 | '' }>,
     operation: (browser: ReturnType<typeof session>, group: T & { sessionId: string }, created: boolean) => Promise<R>,
-    initialOptions: (group: T) => { url?: string; html?: string; maxDurationMs?: number } = () => ({}),
+    initialOptions: (group: T) => { url?: string; html?: string } = () => ({}),
   ) => {
     const idCounts = new Map<string, number>();
     for (const { sessionID } of input.actions) if (sessionID) idCounts.set(sessionID, (idCounts.get(sessionID) ?? 0) + 1);
@@ -191,7 +186,7 @@ function createServer(env: Env, publicOrigin: string) {
         const browser = suppliedID === undefined ? session(sessionId) : await existingSession(sessionId);
         if (suppliedID === undefined) {
           await browser.initialize({ sessionId, width: group.width ?? 1280, height: group.height ?? 720,
-            maxDurationMs: 10_000, ...options });
+            ...options });
         }
         return { actionIndex: index, sessionID: sessionId, ok: true, response: await operation(browser, { ...group, sessionId }, suppliedID === undefined) };
       } catch (error) {
@@ -229,15 +224,15 @@ function createServer(env: Env, publicOrigin: string) {
     // Initialization already loads new tabs; do not execute navigation twice.
     if (created) return withWebResult({ action: 'navigate', page: await browser.inspect() });
     return withWebResult(group.html !== undefined
-      ? await browser.navigateHtml(group.html, group.maxDurationMs)
-      : await browser.navigate(group.url!, group.maxDurationMs));
+      ? await browser.navigateHtml(group.html)
+      : await browser.navigate(group.url!));
   }, (group) => {
     if ((group.url === undefined) === (group.html === undefined)) throw new TypeError('Provide a URL or inline HTML, not both.');
     if (group.url) assertPublicHttpUrl(group.url);
     if (group.html !== undefined && new TextEncoder().encode(group.html).byteLength > 1 * 1024 * 1024) {
       throw new RangeError('Inline HTML exceeds 1048576 UTF-8 bytes, the resumable-session limit.');
     }
-    return { url: group.url, html: group.html, maxDurationMs: group.maxDurationMs };
+    return { url: group.url, html: group.html };
   })));
 
   server.registerTool('servo_inspect', {
@@ -278,56 +273,56 @@ function createServer(env: Env, publicOrigin: string) {
     description: 'Evaluate a JavaScript expression in each selected page in parallel. Every entry carries its own script and budget. If the script returns a promise, it is awaited within the budget. Each action returns a response with a WebDriver-style JSON clone, such as {"Ok":{"String":"…"}} or {"Err":…}; return JSON.stringify(value) for complex data. Scripts can modify pages or cause external effects.',
     inputSchema: evaluateSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.evaluate(group.script, group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.evaluate(group.script))));
 
   server.registerTool('servo_click', {
     title: 'Servo click',
     description: 'Click different device-pixel coordinates in multiple selected tabs in parallel. Ground each entry’s coordinates in that tab’s screenshot or measured DOM bounds. Clicks can submit forms or trigger page actions.',
     inputSchema: clickSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.click(group.x, group.y, group.button, group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.click(group.x, group.y, group.button))));
 
   server.registerTool('servo_type_text', {
     title: 'Servo type text',
     description: 'Type per-session text into each selected tab’s currently focused control in parallel. Focus the intended fields first. Typing can trigger live search, autosave, or other page effects.',
     inputSchema: typeTextSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.typeText(group.text, group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.typeText(group.text))));
 
   server.registerTool('servo_press_key', {
     title: 'Servo press key',
     description: 'Press a key in multiple selected tabs in parallel. Each entry has its own key. Focus intended controls first; Enter may submit forms.',
     inputSchema: keySchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.pressKey(group.key, group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.pressKey(group.key))));
 
   server.registerTool('servo_scroll', {
     title: 'Servo scroll',
     description: 'Scroll multiple selected tabs in parallel. Each entry has its own pixel deltas and optional viewport point.',
     inputSchema: scrollSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.scroll(group.deltaX, group.deltaY, group.x, group.y, group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.scroll(group.deltaX, group.deltaY, group.x, group.y))));
 
   server.registerTool('servo_history', {
     title: 'Servo history',
     description: 'Move multiple selected tabs backward or forward in their live Servo history. Each entry chooses its own direction. History is not part of the restore snapshot and resets after the runtime is discarded.',
     inputSchema: historySchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.history(group.direction, group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.history(group.direction))));
 
   server.registerTool('servo_reload', {
     title: 'Servo reload',
-    description: 'Reload multiple selected tabs in parallel and wait for each page to settle.',
-    inputSchema: multiSession({ maxDurationMs: z.number().int().min(100).max(MAX_TOOL_DURATION_MS).default(10_000) }),
+    description: 'Reload multiple selected tabs in parallel and process pending browser events without waiting for network or timer idle.',
+    inputSchema: multiSession({}),
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.reload(group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.reload())));
 
   server.registerTool('servo_wait', {
     title: 'Servo wait',
-    description: 'Let multiple selected pages process browser timers and pending network work in parallel, using each entry’s own time budget.',
+    description: 'Let multiple selected pages process browser timers and pending network work in parallel, without requiring the page to become globally idle.',
     inputSchema: waitSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.wait(group.maxDurationMs))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.wait())));
 
   server.registerTool('servo_screenshot', {
     title: 'Servo screenshot',
@@ -337,7 +332,7 @@ function createServer(env: Env, publicOrigin: string) {
   }, async (input) => safely(async () => {
     const images: Uint8Array[] = [];
     const { responses } = await runSessions(input, async (browser, group) => {
-      const result = await browser.screenshot(group.fullPage, group.maxDurationMs);
+      const result = await browser.screenshot(group.fullPage);
       const imageIndex = images.push(result.png) - 1;
       return { page: result.page, imageIndex };
     });
