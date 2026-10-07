@@ -2,11 +2,14 @@ import { createMcpHandler } from 'agents/mcp/server';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import widgetHtml from './browser-widget.html';
+import searchWidgetHtml from './search-widget.html';
+import { searchWeb } from './web-search';
 import { ServoBrowserSession } from './browser-session';
 import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser.html';
+const SEARCH_WIDGET_URI = 'ui://servo/search.html';
 const MAX_TOOL_DURATION_MS = 15_000;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
@@ -90,7 +93,7 @@ function errorResult(error: unknown) {
 }
 
 function createServer(env: Env, publicOrigin: string) {
-  const server = new McpServer({ name: 'servo-mcp', version: '0.3.0' }, {
+  const server = new McpServer({ name: 'servo-mcp', version: '0.4.0' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Omit sessionID or use a falsy value on an action to create a new tab automatically and perform that action. There is no standalone session creation tool. Keep a mapping from a short description to its returned sessionID, and pass that exact ID on the action as sessionID for later operations. Every tool returns an ordered top-level responses array with one response object per action, plus metadata counts for all actions. Each focused browser tool runs its action entries concurrently. Sessions expire automatically after 30 days without use.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
@@ -117,6 +120,38 @@ function createServer(env: Env, publicOrigin: string) {
     mimeType: 'text/html;profile=mcp-app', text: widgetHtml,
     _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
   }] }));
+
+  server.registerResource('servo-web-search-ui', SEARCH_WIDGET_URI, {
+    title: 'Servo web search',
+    description: 'Search the public web and inspect ranked results.',
+    mimeType: 'text/html;profile=mcp-app',
+    _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
+  }, async (uri) => ({ contents: [{ uri: uri.href,
+    mimeType: 'text/html;profile=mcp-app', text: searchWidgetHtml,
+    _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
+  }] }));
+
+  const browserUiMeta = {
+    ui: { resourceUri: WIDGET_URI },
+    'openai/outputTemplate': WIDGET_URI,
+  };
+  const searchUiMeta = {
+    ui: { resourceUri: SEARCH_WIDGET_URI },
+    'openai/outputTemplate': SEARCH_WIDGET_URI,
+  };
+
+  server.registerTool('servo_web_search', {
+    title: 'Servo web search',
+    description: 'Search the public web for current information. Returns ranked results with title, URL, and a concise snippet. Use this before browsing when you need to discover relevant pages; use servo_navigate to open a result.',
+    inputSchema: z.object({
+      query: z.string().trim().min(1).max(512),
+      limit: z.number().int().min(1).max(10).default(8),
+    }).strict(),
+    _meta: searchUiMeta,
+  }, async ({ query, limit }) => safely(async () => ({
+    query,
+    results: await searchWeb(query, limit),
+  })));
 
   type SessionGroup = { width?: number; height?: number };
   type SessionInput<T extends { sessionID?: unknown }> = { actions: T[] };
@@ -175,6 +210,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo navigate',
     description: 'Load a public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. Each actions entry has its own load budget; private/local network addresses are blocked.',
     inputSchema: navigateSchema,
+    _meta: browserUiMeta,
   }, async (input) => safely(async () => runSessions(input, async (browser, group, created) => {
     // Initialization already loads new tabs; do not execute navigation twice.
     if (created) return withWebResult({ action: 'navigate', page: await browser.inspect() });
@@ -194,6 +230,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo inspect',
     description: 'Read the final URL, page title, and visible text for multiple selected tabs. Returns one response object per action, with a web-search-style result entry containing title, URL, snippet, and content.',
     inputSchema: inspectSchema,
+    _meta: browserUiMeta,
   }, async (input) => safely(async () =>
     runSessions(input, (browser) => browser.inspect().then((page) => withWebResult({ page }))),
   ));
@@ -272,6 +309,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo screenshot',
     description: 'Capture viewport or full-page screenshots with an actions array of objects, each carrying an optional sessionID. Returns an ordered responses array; imageIndex maps each response to its screenshot image block.',
     inputSchema: screenshotSchema,
+    _meta: browserUiMeta,
   }, async (input) => safely(async () => {
     const images: Uint8Array[] = [];
     const { responses } = await runSessions(input, async (browser, group) => {
