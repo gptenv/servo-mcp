@@ -265,7 +265,7 @@ async function pump(runtime: ServoRuntime): Promise<void> {
 }
 
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
-  const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression, ));
+  const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression));
   if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
     throw new Error('Servo returned an invalid page summary.');
   }
@@ -274,7 +274,7 @@ async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
 
 async function pageUrl(runtime: ServoRuntime): Promise<string> {
   try {
-    const value = parseEvaluationResult(await runtime.evaluate('location.href', ));
+    const value = parseEvaluationResult(await runtime.evaluate('location.href'));
     if (typeof value === 'string') return value;
   } catch {
     // Fall back to the complete summary for older runtime adapters.
@@ -442,7 +442,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   private async storageProbe(runtime: ServoRuntime, reset: boolean): Promise<StorageProbe | undefined> {
     try {
       const value = parseEvaluationResult(await runtime.evaluate(
-        storageProbeExpression(this.storageProbeKey, reset), ,
+        storageProbeExpression(this.storageProbeKey, reset),
       ));
       if (typeof value !== 'object' || value === null || !('supported' in value) || value.supported !== true
         || !('localStorage' in value) || typeof value.localStorage !== 'boolean'
@@ -780,14 +780,14 @@ export class ServoBrowserSession extends DurableObject<Env> {
         entries.push([key, value]);
       }
     } finally {
-      await runtime.evaluate(`delete globalThis[${temporaryKey}]`, ).catch(() => undefined);
+      await runtime.evaluate(`delete globalThis[${temporaryKey}]`).catch(() => undefined);
     }
     return entries;
   }
 
   private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
-    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB), ));
+    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB)));
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error(`Servo returned invalid browser restore state: ${JSON.stringify(value).slice(0, 512)}`);
     }
@@ -873,7 +873,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false) {
     const result = parseEvaluationResult(await runtime.evaluate(
-      applyResumeState(snapshotForOrigin(snapshot, url)), ,
+      applyResumeState(snapshotForOrigin(snapshot, url)),
     ));
     if (typeof result !== 'object' || result === null || !('restored' in result)) {
       const action = reapplying ? 'reapply' : 'apply';
@@ -1298,206 +1298,3 @@ export class ServoBrowserSession extends DurableObject<Env> {
       // each chunk directly to storage from writeOutputChunk above.
       let outputBytes: number;
       if (typeof encodedOutput === 'number') {
-        outputBytes = encodedOutput;
-      } else {
-        const legacyOutput = encodedOutput as unknown as Uint8Array;
-        outputBytes = legacyOutput.byteLength;
-        for (let offset = 0, chunkIndex = 0; offset < legacyOutput.length; offset += 512 * 1024, chunkIndex++) {
-          this.ctx.storage.sql.exec(
-            'INSERT INTO browser_recording_output (recording_id, chunk_index, chunk_blob) VALUES (?, ?, ?)',
-            recordingId, chunkIndex, sqlBuffer(legacyOutput.subarray(offset, Math.min(offset + 512 * 1024, legacyOutput.length))),
-          );
-        }
-      }
-      this.evictOldRecordingsFor(outputBytes);
-      const downloadToken = crypto.randomUUID();
-      const expiresAt = Date.now() + RECORDING_RETENTION_MS;
-      this.ctx.storage.sql.exec(
-        "UPDATE browser_recording SET status = 'ready', stored_bytes = ?, expires_at = ?, download_token = ?, error = NULL WHERE id = ? AND status = 'encoding'",
-        outputBytes, expiresAt, downloadToken, recordingId,
-      );
-      this.ctx.storage.sql.exec('DELETE FROM browser_recording_frame WHERE recording_id = ?', recordingId);
-      await this.scheduleNextAlarm();
-    } catch (error) {
-      await this.failRecording(recordingId, error);
-    }
-  }
-
-  async startScreenRecording(fps = 2, maxDurationSeconds = 30): Promise<{
-    recordingId: string; status: RecordingStatus; fps: number; maxDurationSeconds: number; startedAt: number;
-  }> {
-    return this.serial(async () => {
-      if (!Number.isInteger(fps) || fps < 1 || fps > MAX_RECORDING_FPS) {
-        throw new RangeError(`Recording fps must be between 1 and ${MAX_RECORDING_FPS}.`);
-      }
-      if (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 1 || maxDurationSeconds > MAX_RECORDING_DURATION_SECONDS) {
-        throw new RangeError(`Recording duration must be between 1 and ${MAX_RECORDING_DURATION_SECONDS} seconds.`);
-      }
-      const inProgress = this.ctx.storage.sql.exec<{ id: string }>(
-        "SELECT id FROM browser_recording WHERE status IN ('recording', 'encoding') LIMIT 1",
-      ).toArray()[0];
-      if (inProgress) throw new Error('This tab already has a recording in progress.');
-      await this.requireRuntime();
-      const recordingId = crypto.randomUUID();
-      const startedAt = Date.now();
-      const maxDurationMs = maxDurationSeconds * 1000;
-      const maxFrames = fps * maxDurationSeconds;
-      this.ctx.storage.sql.exec(
-        "INSERT INTO browser_recording (id, status, started_at, expires_at, fps, max_duration_ms, max_frames) VALUES (?, 'recording', ?, ?, ?, ?, ?)",
-        recordingId, startedAt, startedAt + maxDurationMs + RECORDING_RETENTION_MS, fps, maxDurationMs, maxFrames,
-      );
-      await this.captureRecordingFrame(recordingId, true);
-      const recording = this.recording(recordingId);
-      if (!recording || recording.status !== 'recording') {
-        throw new Error(recording?.error ?? 'The first screen recording frame could not be captured.');
-      }
-      this.startRecordingTimer(recordingId, fps);
-      await this.renewLease();
-      return { recordingId, status: 'recording', fps, maxDurationSeconds, startedAt };
-    });
-  }
-
-  async stopScreenRecording(recordingId: string): Promise<{ recordingId: string; status: RecordingStatus; targetFrames: number; stoppedAt?: number }> {
-    return this.serial(async () => {
-      const recording = this.recording(recordingId);
-      if (!recording) throw new Error('Screen recording was not found for this tab.');
-      if (recording.status === 'recording') await this.beginRecordingEncoding(recording);
-      const updated = this.recording(recordingId)!;
-      return { recordingId, status: updated.status, targetFrames: updated.target_frames, stoppedAt: updated.stopped_at ?? undefined };
-    });
-  }
-
-  async getScreenRecordingStatus(recordingId: string): Promise<{
-    recordingId: string; status: RecordingStatus; fps: number; capturedFrames: number; targetFrames: number;
-    width: number; height: number; sizeBytes: number; startedAt: number; stoppedAt?: number; expiresAt: number; error?: string;
-  }> {
-    return this.serial(async () => {
-      await this.pruneExpiredRecordings();
-      await this.scheduleNextAlarm();
-      const recording = this.recording(recordingId);
-      if (!recording) throw new Error('Screen recording was not found for this tab.');
-      const targetFrames = recording.status === 'recording'
-        ? Math.min(recording.max_frames, Math.max(1, Math.ceil(
-          Math.min(Date.now() - recording.started_at, recording.max_duration_ms) * recording.fps / 1000,
-        )))
-        : recording.target_frames;
-      return {
-        recordingId,
-        status: recording.status,
-        fps: recording.fps,
-        capturedFrames: recording.captured_frames,
-        targetFrames,
-        width: recording.width,
-        height: recording.height,
-        sizeBytes: recording.status === 'ready' ? recording.stored_bytes : 0,
-        startedAt: recording.started_at,
-        stoppedAt: recording.stopped_at ?? undefined,
-        expiresAt: recording.expires_at,
-        error: recording.error ?? undefined,
-      };
-    });
-  }
-
-  async getScreenRecordingDownloadInfo(recordingId: string): Promise<{
-    recordingId: string; status: RecordingStatus; downloadToken?: string; sizeBytes: number; expiresAt: number;
-  }> {
-    return this.serial(async () => {
-      await this.pruneExpiredRecordings();
-      await this.scheduleNextAlarm();
-      const recording = this.recording(recordingId);
-      if (!recording) throw new Error('Screen recording was not found for this tab.');
-      const ready = recording.status === 'ready' && recording.expires_at > Date.now() && recording.download_token !== null;
-      return {
-        recordingId,
-        status: recording.status,
-        downloadToken: ready ? recording.download_token! : undefined,
-        sizeBytes: ready ? recording.stored_bytes : 0,
-        expiresAt: recording.expires_at,
-      };
-    });
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
-    const parts = new URL(request.url).pathname.split('/').filter(Boolean);
-    if (parts.length !== 4 || parts[0] !== 'recordings') return new Response('Not found', { status: 404 });
-    const [, sessionId, recordingId, token] = parts;
-    if (!/^[0-9a-f-]{36}$/i.test(sessionId) || !/^[0-9a-f-]{36}$/i.test(recordingId) || !/^[0-9a-f-]{36}$/i.test(token)) {
-      return new Response('Not found', { status: 404 });
-    }
-    return this.serial(async () => {
-      const recording = this.recording(recordingId);
-      if (!recording || recording.status !== 'ready' || recording.expires_at <= Date.now() || recording.download_token !== token) {
-        return new Response('Recording is unavailable or its download link has expired.', { status: 404 });
-      }
-      const rows = this.ctx.storage.sql.exec<RecordingOutputRow>(
-        'SELECT chunk_blob FROM browser_recording_output WHERE recording_id = ? ORDER BY chunk_index', recordingId,
-      ).toArray();
-      if (!rows.length) return new Response('Recording data is missing.', { status: 410 });
-      const chunks = rows.map(({ chunk_blob }) => sqlBytes(chunk_blob));
-      let index = 0;
-      const body = new ReadableStream<Uint8Array>({
-        pull(controller) {
-          if (index >= chunks.length) {
-            controller.close();
-            return;
-          }
-          controller.enqueue(chunks[index++]);
-        },
-      });
-      return new Response(body, {
-        headers: {
-          'Content-Type': 'video/mp4',
-          'Content-Disposition': `attachment; filename="servo-recording-${recordingId}.mp4"`,
-          'Content-Length': String(recording.stored_bytes),
-          'Cache-Control': 'private, no-store',
-          'X-Content-Type-Options': 'nosniff',
-        },
-      });
-    });
-  }
-
-  async capabilities(): Promise<unknown> {
-    return this.operate(async (runtime) => runtime.capabilities());
-  }
-
-  async registerFont(fontBase64: string): Promise<{ faces: number }> {
-    return this.operate(async (runtime) => {
-      const binary = atob(fontBase64);
-      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      const faces = runtime.registerFont(bytes);
-      const count = this.ctx.storage.sql.exec<{ count: number }>(
-        "SELECT COUNT(DISTINCT name) AS count FROM browser_asset WHERE name LIKE 'font:%'",
-      ).toArray()[0]?.count ?? 0;
-      await this.storeAsset(`font:${String(count).padStart(6, '0')}`, fontBase64);
-      return { faces };
-    });
-  }
-
-  async close(): Promise<{ status: 'closed' }> {
-    return this.serial(async () => {
-      this.clearRecordingTimer();
-      const active = this.ctx.storage.sql.exec<{ id: string }>(
-        "SELECT id FROM browser_recording WHERE status IN ('recording', 'encoding') LIMIT 1",
-      ).toArray()[0];
-      if (active) await this.failRecording(active.id, 'The browser session was closed before recording completed.');
-      this.clearRuntime();
-      const row = this.row();
-      if (row && row.status !== 'closed') this.writeStatus('closed');
-      this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-      this.ctx.storage.sql.exec('DELETE FROM browser_asset');
-      await this.scheduleNextAlarm();
-      return { status: 'closed' };
-    });
-  }
-
-  async alarm(): Promise<void> {
-    await this.serial(async () => {
-      const pending = this.ctx.storage.sql.exec<{ id: string }>(
-        "SELECT id FROM browser_recording WHERE status = 'encoding' LIMIT 1",
-      ).toArray()[0];
-      if (pending) await this.finalizeRecording(pending.id);
-      await this.expireIfIdle();
-    });
-  }
-}
