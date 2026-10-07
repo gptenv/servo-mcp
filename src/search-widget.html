@@ -19,7 +19,7 @@
 <main>
   <h1>Servo web search</h1>
   <form id="search-form">
-    <input id="query" type="search" placeholder="Search the web" autocomplete="off" required>
+    <select id="provider"><option value="auto">Auto (all engines)</option><option value="google">Google</option><option value="bing">Bing</option><option value="duckduckgo">DuckDuckGo</option><option value="yandex">Yandex</option><option value="all">All engines</option></select>\n    <input id="query" type="search" placeholder="Search the web" autocomplete="off" required>
     <button>Search</button>
   </form>
   <p id="status" role="status"></p>
