@@ -99,7 +99,7 @@ export const parsers: Record<Provider, (body: string, limit?: number) => WebSear
 };
 
 const endpoints: Record<Provider, (query: string, limit: number) => URL> = {
-  google: (query) => {
+  google: (query, limit) => {
     const url = new URL('https://www.google.com/search');
     url.searchParams.set('q', query);
     url.searchParams.set('num', String(limit));
