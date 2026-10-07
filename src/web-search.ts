@@ -16,20 +16,18 @@ export type WebSearchResult = {
 type Provider = Exclude<SearchProvider, 'auto' | 'all'>;
 
 function decodeHtml(value: string): string {
-  const text = value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]*>/g, ' ');
-  return text
-    .replace(/&(?:amp|lt|gt|quot|#39|apos);/g, (entity) => ({
-      '&amp;': '&',
-      '&lt;': '<',
-      '&gt;': '>',
-      '&quot;': '"',
-      '&#39;': "'",
-      '&apos;': "'",
-    })[entity] ?? entity)
-    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
-    .replace(/\s+/g, ' ')
-    .trim();
+  let text = value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+  text = text.replace(/&(?:amp|lt|gt|quot|#39|apos);/g, (entity) => ({
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+  })[entity] ?? entity);
+  text = text.replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)));
+  text = text.replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
+  return text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 function decodeUrl(value: string): string {
   const decoded = decodeHtml(value);
