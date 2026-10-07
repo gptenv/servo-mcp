@@ -58,6 +58,7 @@ export class FakeServoRuntime {
   readonly restoredCookies: Uint8Array[] = [];
   trapped: boolean;
   private evaluatePageCount = 0;
+  private currentUrl = 'about:blank';
   private capturedStorage: Record<string, [string, string][]> = {
     localStorage: [],
     sessionStorage: [],
@@ -88,7 +89,8 @@ export class FakeServoRuntime {
         : (configuredSummary as FakeSummaryFn)(script);
     }
     if (typeof summary === 'function') summary = (summary as FakeSummaryFn)(script);
-    return summary ?? {};
+    if (summary) return summary;
+    return { url: this.currentUrl };
   }
 
   private summaryJson(script: string): string {
@@ -244,7 +246,9 @@ export class FakeServoRuntime {
 
   loadPage(url: string): boolean {
     this.calls.push(`loadPage:${url}`);
-    return this.options.loadPageReturns ?? true;
+    const accepted = this.options.loadPageReturns ?? true;
+    if (accepted) this.currentUrl = url;
+    return accepted;
   }
 
   loadHtml(html: string, _opts?: { url?: string }): boolean {
