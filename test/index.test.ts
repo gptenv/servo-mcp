@@ -134,7 +134,7 @@ describe('MCP Worker routes and server registration', () => {
     expect(harness.handlerOptions).toEqual([{ route: '/mcp' }]);
     expect(harness.servers).toHaveLength(1);
     expect([...harness.tools.keys()]).toEqual([
-      'servo_web_search', 'servo_session_status', 'servo_navigate',
+      'servo_web_search', 'servo_app_open', 'servo_session_status', 'servo_navigate',
       'servo_inspect', 'servo_http_request', 'servo_http_get', 'servo_http_post', 'servo_http_put',
       'servo_http_patch', 'servo_http_delete', 'servo_http_head', 'servo_http_options',
       'servo_evaluate', 'servo_click', 'servo_type_text', 'servo_press_key',
@@ -149,10 +149,12 @@ describe('MCP Worker routes and server registration', () => {
     for (const [name, tool] of harness.tools) {
       if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser.html');
     }
-    expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']?.entrypoints?.[0]?.type).toBe('global');
+    expect(registeredTool('servo_app_open').definition._meta?.['openai/ui']?.entrypoints?.[0]?.type).toBe('global');
+    expect(registeredTool('servo_app_open').definition.inputSchema.parse({})).toEqual({});
+    expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']).toBeUndefined();
     expect(registeredTool('servo_inspect').definition._meta?.['openai/ui']).toBeUndefined();
     const searchWidget = await searchResource.handler(new URL('ui://servo/search.html'));
-    expect(searchWidget.contents[0].text).toContain('Search Google, Bing, DuckDuckGo, and Yandex');
+    expect(searchWidget.contents[0].text).toContain('Servo web search');
 
     const browserResource = harness.resources.get('servo-browser-ui')!;
     const widget = await browserResource.handler(new URL('ui://servo/browser.html'));
@@ -307,7 +309,7 @@ describe('focused browser tools', () => {
         deltaX: 0, deltaY: 1, direction: 'back', fontBase64: 'Zm9udA==',
         recordingId: '00000000-0000-4000-8000-000000000003',
       };
-      if (name === 'servo_web_search') continue;
+      if (name === 'servo_web_search' || name === 'servo_app_open') continue;
       const allowed = tool.definition.inputSchema.shape.actions.element.shape;
       const action = Object.fromEntries(Object.entries(inputs).filter(([key]) => key in allowed));
       const response = structured(await invoke(name, { actions: [action] }));
