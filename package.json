@@ -1,10 +1,10 @@
 {
   "name": "servo-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "A ChatGPT MCP App that runs Servo WASM in a Cloudflare Worker.",
+  "description": "A ChatGPT MCP App that runs Servo WASM as an isolated, headless browser with web search.",
   "scripts": {
     "engine:fetch": "node --env-file-if-exists=.env scripts/fetch-servo-wasm-artifact.mjs",
     "engine:build": "npm run engine:fetch",
