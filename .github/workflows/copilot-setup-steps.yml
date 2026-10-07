@@ -1,1 +1,36 @@
-Please use install rustup if you don't have it yet and then use rustup to install the full most recent rust-nightly toolchain and also its wasm32-unknown-unknown target, and make sure you also have other common programming build tools and compiler stuff such as gcc, clang, gdb, llvm, and also please have fun with everything you're doing because this is all for fun! :)
+name: "Copilot Setup Steps"
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc clang gdb llvm
+
+      - name: Install Rust nightly and WASM target
+        run: |
+          rustup toolchain install nightly --profile minimal --target wasm32-unknown-unknown
+          rustup default nightly
+          rustup target add wasm32-unknown-unknown --toolchain nightly

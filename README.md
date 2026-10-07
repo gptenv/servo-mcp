@@ -11,7 +11,7 @@ change the license of Servo or its other dependencies.
 
 ## MCP tools
 
-The server exposes focused tools. Every tool accepts an `actions` array of
+The server exposes focused tools. The browser UI is a ChatGPT MCP App resource, and the same app is advertised with a global sidebar entrypoint; browser tools are linked to that shared UI. The search tool has a dedicated search view within the app. Every tool accepts an `actions` array of
 objects; each browser action carries an optional `sessionID` alongside its
 arguments. Omit `sessionID` or set it to a falsy value (`null`, `false`, `0`, or
 `""`) to create a new tab and perform the action. A truthy ID must identify an
@@ -29,6 +29,7 @@ session created by a status action returns its status; an existing session
 reports runtime availability without forcing a page reload. HTTP actions do
 not allocate browser sessions.
 
+- `servo_web_search`
 - `servo_session_status`
 - `servo_navigate`, `servo_reload`, `servo_history`
 - `servo_inspect`, `servo_evaluate`, `servo_get_capabilities`
@@ -38,6 +39,8 @@ not allocate browser sessions.
 - `servo_screenshot`, `servo_register_font`
 - `servo_recording_start`, `servo_recording_stop`, `servo_recording_status`,
   `servo_recording_download`
+
+The `servo_web_search` tool supports `auto`, `all`, `google`, `bing`, `duckduckgo`, and `yandex` provider modes. `auto` and `all` query all four public search engines in parallel, tolerate individual provider failures, and deduplicate URLs before returning the bounded result set. The unauthenticated provider adapters use public search pages/feeds, so their markup can change; the tool is deliberately defensive and reports which providers succeeded or failed. It is bounded to 10 results and an 8-second upstream timeout per provider. Search results are discovery data, so use `servo_navigate` to open and inspect the selected pages before relying on their contents.
 
 The HTTP request tools call public HTTP(S) endpoints directly. They accept
 `{ "actions": [{ "url": "https://example.com" }, ...] }` without session IDs
