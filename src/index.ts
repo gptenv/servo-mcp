@@ -253,6 +253,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo HTTP request',
     description: 'Send an array of public HTTP(S) requests. Each actions entry accepts any valid Fetch API method (including custom extension methods), optional custom request headers and UTF-8 body, redirect policy, timeout, and response-size limit. Returns one response object per request with status, response headers, body (or base64 for binary), and citation-style page results. CONNECT, TRACE, and TRACK are forbidden by the Fetch API.',
     inputSchema: z.object({ actions: z.array(httpRequestSchema.strict()).min(1).max(20) }).strict(),
+    _meta: browserUiMeta,
   }, async ({ actions }) => safely(() => runHttpActions(actions, requestHttp)));
 
   for (const method of HTTP_METHODS) {
@@ -261,6 +262,7 @@ function createServer(env: Env, publicOrigin: string) {
       title: `Servo HTTP ${method}`,
       description: `Send an array of ${method} requests to public HTTP(S) URLs with optional custom request headers${['GET', 'HEAD'].includes(method) ? '' : ' and UTF-8 body'}. Returns one response object per request with status, headers, bounded body data, and citation-style page results.`,
       inputSchema: z.object({ actions: z.array(httpVerbRequestSchema.strict()).min(1).max(20) }).strict(),
+      _meta: browserUiMeta,
     }, async ({ actions }) => safely(() => runHttpActions(actions, (action) => requestHttp({ ...action, method }))));
   }
 
