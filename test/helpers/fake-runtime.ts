@@ -234,7 +234,7 @@ export class FakeServoRuntime {
     return Promise.resolve(this.options.pumpResult ?? { settled: true });
   }
 
-  loadPage(url: string): boolean {
+  pumpCooperatively(_opts?: { maxTurns?: number }): Promise<{ ready: boolean; turns: number; pendingFetches: number; timersPending: boolean }> {\n    this.calls.push('pump');\n    if (this.options.pumpFactory) return this.options.pumpFactory().then(() => ({ ready: true, turns: 1, pendingFetches: 0, timersPending: false }));\n    if (this.options.pumpThrows) return Promise.reject(this.options.pumpThrows);\n    const settled = this.options.pumpResult?.settled ?? true;\n    return Promise.resolve({ ready: true, turns: 1, pendingFetches: settled ? 0 : 1, timersPending: !settled });\n  }\n\n  loadPage(url: string): boolean {
     this.calls.push(`loadPage:${url}`);
     return this.options.loadPageReturns ?? true;
   }
