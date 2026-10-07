@@ -55,7 +55,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install --yes clang-19
-          ./servo-wasm-source/mach bootstrap --yes --skip-lints --skip-nextest
+          ./mach bootstrap --yes --skip-lints --skip-nextest
 
       - name: Add the raw WASM target
         run: rustup target add wasm32-unknown-unknown
