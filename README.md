@@ -31,7 +31,6 @@ not allocate browser sessions.
 
 - `servo_web_search`
 - `servo_session_status`
-- `servo_web_search`
 - `servo_navigate`, `servo_reload`, `servo_history`
 - `servo_inspect`, `servo_evaluate`, `servo_get_capabilities`
 - `servo_http_request`, plus `servo_http_get`, `servo_http_post`, `servo_http_put`,
