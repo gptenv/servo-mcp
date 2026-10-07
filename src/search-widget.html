@@ -47,7 +47,8 @@
     }
     if (message.method === 'ui/notifications/tool-input') {
       const input = message.params?.arguments ?? message.params;
-      if (input?.query) document.querySelector('#query').value = input.query;\n      if (input?.provider) document.querySelector('#provider').value = input.provider;
+      if (input?.query) document.querySelector('#query').value = input.query;
+      if (input?.provider) document.querySelector('#provider').value = input.provider;
     }
     if (message.method === 'ui/notifications/tool-result') render(message.params?.structuredContent);
   });
