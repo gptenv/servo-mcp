@@ -155,6 +155,7 @@ describe('MCP Worker routes and server registration', () => {
     expect(registeredTool('servo_inspect').definition._meta?.['openai/ui']).toBeUndefined();
     const searchWidget = await searchResource.handler(new URL('ui://servo/search.html'));
     expect(searchWidget.contents[0].text).toContain('Servo web search');
+    expect(searchWidget.contents[0].text).toContain('<option value="brave">Brave</option>');
 
     const browserResource = harness.resources.get('servo-browser-ui')!;
     const widget = await browserResource.handler(new URL('ui://servo/browser.html'));
