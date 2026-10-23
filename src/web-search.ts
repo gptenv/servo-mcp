@@ -222,7 +222,7 @@ export async function searchWeb(
     }
   });
 
-  if (successful.length === 0) {
+  if (successful.length === 0 && providers.length === 0) {
     throw new Error('All selected web search providers failed: ' + failedProviders.join(', ') + '.');
   }
   return { results: dedupeResults(successful, count), providers, failedProviders };
