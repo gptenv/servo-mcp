@@ -48,7 +48,17 @@
       message.error ? request.reject(message.error) : request.resolve(message.result);
       return;
     }
-    if (message.method === 'ui/notifications/tool-result') render(message.params?.structuredContent);
+    if (message.method === 'ui/notifications/tool-result') {
+      const result = message.params?.structuredContent;
+      const first = result?.responses?.[0];
+      const pageResult = first?.response?.page ?? first?.response ?? result;
+      if (first?.ok === false) {
+        document.querySelector('#status').textContent = first.error || 'Servo action failed.';
+        document.querySelector('#details').textContent = JSON.stringify(first, null, 2);
+      } else {
+        render(pageResult, message.params?.content ?? []);
+      }
+    }
     if (message.method === 'ui/notifications/tool-input') {
       const input = message.params?.arguments ?? message.params;
       if (input?.url) document.querySelector('#url').value = input.url;
