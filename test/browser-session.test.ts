@@ -293,7 +293,8 @@ describe('initialize', () => {
     scriptRuntime({ summary: { url: 'https://public.example/page', title: 'Public', text: 'text' } });
     const session = await newSession();
     await session.initialize(initOptions({ url: 'https://public.example/page' }));
-    expect(lastRuntimeCalls()).toContain('loadPage:https://public.example/page');
+    expect(runtimeConfigs[0].url).toBe('https://public.example/page');
+    expect(lastRuntimeCalls()).not.toContain('loadPage:https://public.example/page');
   });
 
   it('refuses private navigation targets before creating a runtime', async () => {
