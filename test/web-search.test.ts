@@ -53,7 +53,10 @@ describe('searchWeb', () => {
 
   it('queries all providers in auto mode and tolerates individual failures', async () => {
     const fetchMock = vi.fn(async (url: URL) => {
-      if (url.hostname === 'search.brave.com') {\n        return new Response('<div class="snippet"><a href="https://brave.example"><div class="title search-snippet-title" title="Brave result">Brave result</div></a><div class="content">Brave</div></div>', { status: 200 });\n      }\n      if (url.hostname === 'www.google.com') {
+      if (url.hostname === 'search.brave.com') {
+        return new Response('<div class="snippet"><a href="https://brave.example"><div class="title search-snippet-title" title="Brave result">Brave result</div></a><div class="content">Brave</div></div>', { status: 200 });
+      }
+      if (url.hostname === 'www.google.com') {
         return new Response('<html><a href="/url?q=https%3A%2F%2Fexample.com%2Fgoogle-result"><h3>Google result</h3></a></html>', { status: 200 });
       }
       if (url.hostname === 'www.bing.com') {
