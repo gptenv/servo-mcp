@@ -210,7 +210,7 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_session_status', {
     title: 'Servo session status',
-    description: 'Check browser sessions in parallel with an actions array of objects, each carrying an optional sessionID. Returns one ordered response object per action; runtimeAvailable=false with resumable=true is normal after runtime eviction.',
+    description: 'Check existing browser sessions by supplying their sessionID. An empty action creates a new blank tab and returns its status. Returns one ordered response object per action; runtimeAvailable=false with resumable=true is normal after runtime eviction.',
     inputSchema: multiSession({}),
     _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser) => browser.getStatus())));
