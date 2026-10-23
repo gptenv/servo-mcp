@@ -141,11 +141,11 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_web_search', {
     title: 'Servo web search',
-    description: 'Search the public web across Google, Bing, DuckDuckGo, and Yandex. The auto/all modes query providers in parallel, tolerate individual provider failures, and deduplicate results. Use this before browsing when you need to discover relevant pages; use servo_navigate to open a result.',
+    description: 'Search the public web across Brave, Google, Bing, DuckDuckGo, and Yandex. Results are best-effort: public providers may block automated requests or return no parseable results. The response reports successful and failed providers; inspect results with servo_navigate before relying on them.',
     inputSchema: z.object({
       query: z.string().trim().min(1).max(512),
       limit: z.number().int().min(1).max(10).default(8),
-      provider: z.enum(['auto', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
+      provider: z.enum(['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
     }).strict(),
     _meta: searchUiMeta,
   }, async ({ query, limit, provider }) => safely(async () => ({
