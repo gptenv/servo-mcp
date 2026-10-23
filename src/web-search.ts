@@ -3,7 +3,7 @@ const MAX_LIMIT = 10;
 const MAX_QUERY_LENGTH = 512;
 const SEARCH_TIMEOUT_MS = 8_000;
 
-export const SEARCH_PROVIDERS = ['auto', 'google', 'bing', 'duckduckgo', 'yandex', 'all'] as const;
+export const SEARCH_PROVIDERS = ['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all'] as const;
 export type SearchProvider = typeof SEARCH_PROVIDERS[number];
 
 export type WebSearchResult = {
@@ -42,6 +42,25 @@ function parseBingRss(xml: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
     snippet: decodeHtml(item.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] ?? ''),
     provider: 'bing' as const,
   })).filter((result) => result.title && /^https?:\/\//i.test(result.url));
+}
+
+function parseBraveHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
+  const blocks = html.match(/<div class="snippet\\b[\\s\\S]*?(?=<div class="snippet\\b|$)/gi) ?? [];
+  const results: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    const url = decodeUrl(block.match(/<a\\s+href="(https?:\\/\\/[^"]+)"/i)?.[1] ?? '');
+    const title = decodeHtml(block.match(/class="title search-snippet-title[^"]*"\\s+title="([^"]*)"/i)?.[1] ?? '');
+    const snippet = decodeHtml(block.match(/class="content[^"]*">([\\s\\S]*?)<\\/div>/i)?.[1] ?? '');
+    if (!title || !/^https?:\\/\\//i.test(url)) continue;
+    let hostname: string;
+    try { hostname = new URL(url).hostname; } catch { continue; }
+    if (/search\\.brave\\.com$/i.test(hostname) || seen.has(url)) continue;
+    seen.add(url);
+    results.push({ title, url, snippet, provider: 'brave' });
+    if (results.length >= limit) break;
+  }
+  return results;
 }
 
 function parseGoogleHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
@@ -99,6 +118,7 @@ function parseYandexHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[]
 }
 
 export const parsers: Record<Provider, (body: string, limit?: number) => WebSearchResult[]> = {
+  brave: parseBraveHtml,
   google: parseGoogleHtml,
   bing: parseBingRss,
   duckduckgo: parseDuckDuckGoHtml,
@@ -179,7 +199,7 @@ export async function searchWeb(
 
   const count = Math.max(1, Math.min(MAX_LIMIT, Math.trunc(limit)));
   const selected: Provider[] = provider === 'all' || provider === 'auto'
-    ? ['google', 'bing', 'duckduckgo', 'yandex']
+    ? ['brave', 'google', 'bing', 'duckduckgo', 'yandex']
     : [provider];
 
   const settled = await Promise.allSettled(selected.map((name) => searchProvider(name, trimmed, count)));
@@ -202,4 +222,4 @@ export async function searchWeb(
   return { results: dedupeResults(successful, count), providers, failedProviders };
 }
 
-export { parseBingRss, parseGoogleHtml, parseDuckDuckGoHtml, parseYandexHtml };
+export { parseBraveHtml, parseBingRss, parseGoogleHtml, parseDuckDuckGoHtml, parseYandexHtml };
