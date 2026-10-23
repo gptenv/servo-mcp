@@ -903,11 +903,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }
   }
 
-  private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string): Promise<ServoRuntime> {
+  private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank'): Promise<ServoRuntime> {
     const runtime = await createServoWorkerRuntime(servoWasm, {
       width,
       height,
-      url: 'about:blank',
+      url: initialUrl,
       fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(input, init).catch((error: unknown) => {
         const url = input instanceof Request ? input.url : String(input);
         this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
@@ -1114,12 +1114,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
       try {
         if (options.html !== undefined) await this.storeAsset('initial-html', options.html);
         if (options.fontBase64) await this.storeAsset('font:000000', options.fontBase64);
-        const runtime = await this.createRuntime(options.width, options.height, options.sessionId);
+        const runtime = await this.createRuntime(options.width, options.height, options.sessionId, undefined, options.url ?? 'about:blank');
         this.runtime = runtime;
         if (options.html !== undefined) {
           if (!runtime.loadHtml(options.html)) throw new Error('Servo rejected the supplied HTML document.');
-        } else if (options.url && !runtime.loadPage(options.url)) {
-          throw new Error('Servo rejected the requested URL.');
         }
         if (options.url || options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
