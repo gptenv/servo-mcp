@@ -45,17 +45,17 @@ function parseBingRss(xml: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
 }
 
 function parseBraveHtml(html: string, limit = DEFAULT_LIMIT): WebSearchResult[] {
-  const blocks = html.match(/<div class="snippet\\b[\\s\\S]*?(?=<div class="snippet\\b|$)/gi) ?? [];
+  const blocks = html.match(/<div class="snippet\b[\s\S]*?(?=<div class="snippet\b|$)/gi) ?? [];
   const results: WebSearchResult[] = [];
   const seen = new Set<string>();
   for (const block of blocks) {
-    const url = decodeUrl(block.match(/<a\\s+href="(https?:\\/\\/[^"]+)"/i)?.[1] ?? '');
-    const title = decodeHtml(block.match(/class="title search-snippet-title[^"]*"\\s+title="([^"]*)"/i)?.[1] ?? '');
-    const snippet = decodeHtml(block.match(/class="content[^"]*">([\\s\\S]*?)<\\/div>/i)?.[1] ?? '');
-    if (!title || !/^https?:\\/\\//i.test(url)) continue;
+    const url = decodeUrl(block.match(/<a\s+href="(https?:\/\/[^"]+)"/i)?.[1] ?? '');
+    const title = decodeHtml(block.match(/class="title search-snippet-title[^"]*"\s+title="([^"]*)"/i)?.[1] ?? '');
+    const snippet = decodeHtml(block.match(/class="content[^"]*">([\s\S]*?)<\/div>/i)?.[1] ?? '');
+    if (!title || !/^https?:\/\//i.test(url)) continue;
     let hostname: string;
     try { hostname = new URL(url).hostname; } catch { continue; }
-    if (/search\\.brave\\.com$/i.test(hostname) || seen.has(url)) continue;
+    if (/search\.brave\.com$/i.test(hostname) || seen.has(url)) continue;
     seen.add(url);
     results.push({ title, url, snippet, provider: 'brave' });
     if (results.length >= limit) break;
