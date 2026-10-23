@@ -126,6 +126,11 @@ export const parsers: Record<Provider, (body: string, limit?: number) => WebSear
 };
 
 const endpoints: Record<Provider, (query: string, limit: number) => URL> = {
+  brave: (query) => {
+    const url = new URL('https://search.brave.com/search');
+    url.searchParams.set('q', query);
+    return url;
+  },
   google: (query, limit) => {
     const url = new URL('https://www.google.com/search');
     url.searchParams.set('q', query);
@@ -154,6 +159,7 @@ const endpoints: Record<Provider, (query: string, limit: number) => URL> = {
 };
 
 const providerHeaders: Record<Provider, Record<string, string>> = {
+  brave: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Mozilla/5.0 (compatible; Servo-MCP/0.5; +https://github.com/gptenv/servo-mcp)' },
   google: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Servo-MCP/0.5' },
   bing: { Accept: 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8', 'User-Agent': 'Servo-MCP/0.5' },
   duckduckgo: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Servo-MCP/0.5' },
