@@ -296,6 +296,14 @@ describe('initialize', () => {
     expect(lastRuntimeCalls()).toContain('loadPage:https://public.example/page');
   });
 
+  it('fails loudly when a requested navigation remains at about:blank', async () => {
+    scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
+    const session = await newSession();
+    await expect(session.initialize(initOptions({ url: 'https://public.example/page' })))
+      .rejects.toThrow(/remained at about:blank/);
+    expect(sql().table('browser_session')!.rows[0].status).toBe('failed');
+  });
+
   it('refuses private navigation targets before creating a runtime', async () => {
     const session = await newSession();
     await expect(session.initialize(initOptions({ url: 'http://127.0.0.1/' }))).rejects.toThrow(TypeError);
