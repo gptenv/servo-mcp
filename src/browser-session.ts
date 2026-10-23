@@ -1123,6 +1123,9 @@ export class ServoBrowserSession extends DurableObject<Env> {
         }
         if (options.url || options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
+        if ((options.url || options.html !== undefined) && page.url === 'about:blank') {
+          throw new Error('Servo accepted the initial navigation but remained at about:blank; the page was not loaded.');
+        }
         await this.captureSnapshot(runtime);
         await this.storageProbe(runtime, true);
         this.writeStatus('active', Date.now() + SESSION_IDLE_TTL_MS);
@@ -1175,7 +1178,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return this.operate(async (runtime) => {
       if (!runtime.loadPage(url)) throw new Error('Servo rejected the requested URL.');
       await pump(runtime);
-      return { action: 'navigate', page: await this.summary(runtime) };
+      const page = await this.summary(runtime);
+      if (page.url === 'about:blank') {
+        throw new Error(`Servo accepted navigation to ${url} but remained at about:blank; the page was not loaded.`);
+      }
+      return { action: 'navigate', page };
     });
   }
 
@@ -1187,7 +1194,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (!runtime.loadHtml(html)) throw new Error('Servo rejected the supplied HTML document.');
       await this.storeAsset('initial-html', html);
       await pump(runtime);
-      return { action: 'navigate', page: await this.summary(runtime) };
+      const page = await this.summary(runtime);
+      if (page.url === 'about:blank') {
+        throw new Error('Servo accepted inline HTML but remained at about:blank; the document was not loaded.');
+      }
+      return { action: 'navigate', page };
     });
   }
 
