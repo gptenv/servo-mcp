@@ -1,7 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import { dedupeResults, parseBingRss, parseDuckDuckGoHtml, parseGoogleHtml, parseYandexHtml, searchWeb } from '../src/web-search';
+import { dedupeResults, parseBraveHtml, parseBingRss, parseDuckDuckGoHtml, parseGoogleHtml, parseYandexHtml, searchWeb } from '../src/web-search';
 
 describe('search parsers', () => {
+  it('parses Brave result cards and strips HTML from snippets', () => {
+    const html = '<div class="snippet svelte-x" data-pos="0"><div class="result-content">' +
+      '<a href="https://example.com/servo" target="_self"><div class="title search-snippet-title line-clamp-1" title="Servo &amp; WASM">Servo &amp; WASM</div></a>' +
+      '<div class="generic-snippet"><div class="content desktop-default">A <strong>browser</strong> engine.</div></div>' +
+      '</div></div>';
+    expect(parseBraveHtml(html)).toEqual([
+      { title: 'Servo & WASM', url: 'https://example.com/servo', snippet: 'A browser engine.', provider: 'brave' },
+    ]);
+  });
+
   it('parses Bing RSS and decodes XML entities', () => {
     const xml = '<rss><channel><item><title><![CDATA[Servo &amp; WASM]]></title><link>https://example.com/a?x=1&amp;y=2</link><description>A &lt;b&gt;browser&lt;/b&gt; &#39;result&#39;</description></item></channel></rss>';
     expect(parseBingRss(xml)).toEqual([
@@ -43,6 +53,9 @@ describe('searchWeb', () => {
 
   it('queries all providers in auto mode and tolerates individual failures', async () => {
     const fetchMock = vi.fn(async (url: URL) => {
+      if (url.hostname === 'search.brave.com') {
+        return new Response('<div class="snippet"><a href="https://brave.example"><div class="title search-snippet-title" title="Brave result">Brave result</div></a><div class="content">Brave</div></div>', { status: 200 });
+      }
       if (url.hostname === 'www.google.com') {
         return new Response('<html><a href="/url?q=https%3A%2F%2Fexample.com%2Fgoogle-result"><h3>Google result</h3></a></html>', { status: 200 });
       }
@@ -56,10 +69,10 @@ describe('searchWeb', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const result = await searchWeb('servo wasm', 8, 'auto');
-    expect(result.results.map((item) => item.provider)).toEqual(['google', 'bing', 'duckduckgo']);
-    expect(result.providers).toEqual(['google', 'bing', 'duckduckgo']);
+    expect(result.results.map((item) => item.provider)).toEqual(['brave', 'google', 'bing', 'duckduckgo']);
+    expect(result.providers).toEqual(['brave', 'google', 'bing', 'duckduckgo']);
     expect(result.failedProviders).toEqual(['yandex']);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     vi.unstubAllGlobals();
   });
 
@@ -70,6 +83,14 @@ describe('searchWeb', () => {
     )));
     const result = await searchWeb('servo', 2, 'bing');
     expect(result.results).toEqual([{ title: 'Example', url: 'https://example.com', snippet: 'Example result', provider: 'bing' }]);
+    vi.unstubAllGlobals();
+  });
+
+  it('returns an empty result set when providers respond but yield no parseable results', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html>blocked</html>', { status: 200 })));
+    await expect(searchWeb('servo', 8, 'duckduckgo')).resolves.toEqual({
+      results: [], providers: ['duckduckgo'], failedProviders: [],
+    });
     vi.unstubAllGlobals();
   });
 
