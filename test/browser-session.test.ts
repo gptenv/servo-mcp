@@ -753,7 +753,7 @@ describe('operate lifecycle', () => {
     await Promise.resolve();
     const config = runtimeConfigs[runtimeConfigs.length - 1];
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject('plain rejection')));
-    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/x')
+    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/page')
       .catch(() => undefined);
     vi.unstubAllGlobals();
     firstPumpResolve();
