@@ -362,6 +362,7 @@ describe('initialize', () => {
   });
 
   it('continues cooperative pumping while navigation still reports about:blank', async () => {
+    vi.useRealTimers();
     let navigationReady = false;
     scriptRuntime({
       summary: () => navigationReady
