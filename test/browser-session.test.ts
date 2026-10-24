@@ -364,6 +364,7 @@ describe('initialize', () => {
   });
 
   it('retries cooperative pumping until a delayed navigation commits', async () => {
+    vi.useRealTimers();
     let pumpCount = 0;
     scriptRuntime({
       summary: () => pumpCount >= 2
@@ -381,6 +382,7 @@ describe('initialize', () => {
   });
 
   it('waits for the new document when navigating between already-loaded pages', async () => {
+    vi.useRealTimers();
     let pumpCount = 0;
     scriptRuntime({
       summary: () => pumpCount >= 2
