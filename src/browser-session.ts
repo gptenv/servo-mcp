@@ -288,9 +288,11 @@ async function pageNavigationState(runtime: ServoRuntime): Promise<NavigationSta
 // performance.timeOrigin changes on document commits, including same-URL loads.
 async function pumpUntilNavigation(runtime: ServoRuntime, before: NavigationState): Promise<void> {
   const maxAttempts = 30;
+  let lastUrl = before.url;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await runtime.pumpCooperatively({ maxTurns: 500 });
     const current = await pageNavigationState(runtime);
+    lastUrl = current.url;
     const documentCommitted = before.timeOrigin !== null && current.timeOrigin !== null
       ? current.timeOrigin !== before.timeOrigin
       : current.url !== before.url;
@@ -298,6 +300,9 @@ async function pumpUntilNavigation(runtime: ServoRuntime, before: NavigationStat
     // Let queued host promises (including fetch completions) settle before
     // asking Servo to process the next batch of events.
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  if (lastUrl === 'about:blank') {
+    throw new Error(`Servo navigation remained at about:blank after ${maxAttempts} cooperative pump cycles.`);
   }
   throw new Error(`Servo navigation did not commit after ${maxAttempts} cooperative pump cycles.`);
 }
