@@ -946,6 +946,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }
   }
 
+  // URL-based initialization passes its URL to the adapter bootstrap; do not queue a second loadPage().
   private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank'): Promise<ServoRuntime> {
     const runtime = await createServoWorkerRuntime(servoWasm, {
       width,
