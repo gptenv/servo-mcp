@@ -297,6 +297,8 @@ describe('initialize', () => {
   });
 
   it('fails loudly when a requested navigation remains at about:blank', async () => {
+    // This exercises a real asynchronous timeout path, not a frozen fake clock.
+    vi.useRealTimers();
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await expect(session.initialize(initOptions({ url: 'https://public.example/page' })))
@@ -361,22 +363,42 @@ describe('initialize', () => {
     expect(lastRuntimeCalls()).toContain('pump');
   });
 
-  it('continues cooperative pumping while navigation still reports about:blank', async () => {
-    vi.useRealTimers();
-    let navigationReady = false;
+  it('retries cooperative pumping until a delayed navigation commits', async () => {
+    let pumpCount = 0;
     scriptRuntime({
-      summary: () => navigationReady
+      summary: () => pumpCount >= 2
         ? { url: 'https://public.example/page', title: 'Public', text: 'loaded' }
         : { url: 'about:blank', title: '', text: '' },
       pumpFactory: async () => {
-        navigationReady = true;
+        pumpCount++;
         return { settled: false };
       },
     });
     const session = await newSession();
     const result = await session.initialize(initOptions({ url: 'https://public.example/page' }));
     expect(result.page).toEqual({ url: 'https://public.example/page', title: 'Public', text: 'loaded' });
-    expect(lastRuntimeCalls().filter((call) => call === 'pump')).toHaveLength(1);
+    expect(lastRuntimeCalls().filter((call) => call === 'pump')).toHaveLength(2);
+  });
+
+  it('waits for the new document when navigating between already-loaded pages', async () => {
+    let pumpCount = 0;
+    scriptRuntime({
+      summary: () => pumpCount >= 2
+        ? { url: 'https://public.example/next', title: 'Next', text: 'new document' }
+        : { url: 'https://public.example/old', title: 'Old', text: 'stale document' },
+      pumpFactory: async () => {
+        pumpCount++;
+        return { settled: false };
+      },
+    });
+    const session = await newSession();
+    await session.initialize(initOptions({ url: 'https://public.example/old' }));
+    pumpCount = 0;
+    const result = await session.navigate('https://public.example/next');
+    expect(result.page).toEqual({
+      url: 'https://public.example/next', title: 'Next', text: 'new document',
+    });
+    expect(lastRuntimeCalls().filter((call) => call === 'pump')).toHaveLength(3);
   });
 
 
