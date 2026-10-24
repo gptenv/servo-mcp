@@ -297,6 +297,8 @@ describe('initialize', () => {
   });
 
   it('fails loudly when a requested navigation remains at about:blank', async () => {
+    // This exercises a real asynchronous timeout path, not a frozen fake clock.
+    vi.useRealTimers();
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await expect(session.initialize(initOptions({ url: 'https://public.example/page' })))
@@ -359,6 +361,46 @@ describe('initialize', () => {
     const result = await session.initialize(initOptions({ url: 'https://public.example/' }));
     expect(result.page.url).toBe('https://public.example/');
     expect(lastRuntimeCalls()).toContain('pump');
+  });
+
+  it('retries cooperative pumping until a delayed navigation commits', async () => {
+    vi.useRealTimers();
+    let pumpCount = 0;
+    scriptRuntime({
+      summary: () => pumpCount >= 2
+        ? { url: 'https://public.example/page', title: 'Public', text: 'loaded' }
+        : { url: 'about:blank', title: '', text: '' },
+      pumpFactory: async () => {
+        pumpCount++;
+        return { settled: false };
+      },
+    });
+    const session = await newSession();
+    const result = await session.initialize(initOptions({ url: 'https://public.example/page' }));
+    expect(result.page).toEqual({ url: 'https://public.example/page', title: 'Public', text: 'loaded' });
+    expect(lastRuntimeCalls().filter((call) => call === 'pump')).toHaveLength(2);
+  });
+
+  it('waits for the new document when navigating between already-loaded pages', async () => {
+    vi.useRealTimers();
+    let pumpCount = 0;
+    scriptRuntime({
+      summary: () => pumpCount >= 2
+        ? { url: 'https://public.example/next', title: 'Next', text: 'new document' }
+        : { url: 'https://public.example/old', title: 'Old', text: 'stale document' },
+      pumpFactory: async () => {
+        pumpCount++;
+        return { settled: false };
+      },
+    });
+    const session = await newSession();
+    await session.initialize(initOptions({ url: 'https://public.example/old' }));
+    pumpCount = 0;
+    const result = await session.navigate('https://public.example/next');
+    expect(result.page).toEqual({
+      url: 'https://public.example/next', title: 'Next', text: 'new document',
+    });
+    expect(lastRuntimeCalls().filter((call) => call === 'pump')).toHaveLength(3);
   });
 
 
@@ -698,7 +740,9 @@ describe('operate lifecycle', () => {
     let firstPumpResolve!: () => void;
     const pumpGate = new Promise<void>((resolve) => { firstPumpResolve = resolve; });
     const session = await activeSession({
-      summary: { url: 'https://public.example/x' },
+      summary: () => pumpCalls === 0
+        ? { url: 'https://public.example/x' }
+        : { url: 'https://public.example/page' },
       pumpFactory: () => (pumpCalls++ === 0
         ? pumpGate.then(() => ({ settled: true }))
         : Promise.resolve({ settled: true })),
@@ -709,7 +753,7 @@ describe('operate lifecycle', () => {
     await Promise.resolve();
     const config = runtimeConfigs[runtimeConfigs.length - 1];
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject('plain rejection')));
-    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/x')
+    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/page')
       .catch(() => undefined);
     vi.unstubAllGlobals();
     firstPumpResolve();
@@ -718,7 +762,15 @@ describe('operate lifecycle', () => {
   });
 
   it('keeps plain summaries when no fetch failed for the page URL', async () => {
-    const session = await activeSession({ summary: { url: 'https://public.example/page' } });
+    const session = await activeSession({
+      summary: () => pumpCalls === 0
+        ? { url: 'https://public.example/page' }
+        : { url: 'https://public.example/other' },
+      pumpFactory: async () => {
+        pumpCalls++;
+        return { settled: true };
+      },
+    });
     const result = await session.navigate('https://public.example/other');
     expect(result.page.loadError).toBeUndefined();
   });
