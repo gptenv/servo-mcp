@@ -361,6 +361,23 @@ describe('initialize', () => {
     expect(lastRuntimeCalls()).toContain('pump');
   });
 
+  it('continues cooperative pumping while navigation still reports about:blank', async () => {
+    let navigationReady = false;
+    scriptRuntime({
+      summary: () => navigationReady
+        ? { url: 'https://public.example/page', title: 'Public', text: 'loaded' }
+        : { url: 'about:blank', title: '', text: '' },
+      pumpFactory: async () => {
+        navigationReady = true;
+        return { settled: false };
+      },
+    });
+    const session = await newSession();
+    const result = await session.initialize(initOptions({ url: 'https://public.example/page' }));
+    expect(result.page).toEqual({ url: 'https://public.example/page', title: 'Public', text: 'loaded' });
+    expect(lastRuntimeCalls().filter((call) => call === 'pump')).toHaveLength(1);
+  });
+
 
   it('propagates evaluation failures while summarizing the initial page', async () => {
     scriptRuntime({
