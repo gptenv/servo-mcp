@@ -264,6 +264,22 @@ async function pump(runtime: ServoRuntime): Promise<void> {
   await runtime.pumpCooperatively({ maxTurns: 2_000 });
 }
 
+// Navigation can enqueue asynchronous network work that outlives one cooperative
+// pump. Do not read the initial about:blank document after a single pump and
+// mistake that transient state for a completed navigation. Keep pumping in
+// bounded chunks so the Worker can service pending fetches between turns.
+async function pumpUntilNavigation(runtime: ServoRuntime): Promise<void> {
+  const maxAttempts = 30;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await runtime.pumpCooperatively({ maxTurns: 500 });
+    if (await pageUrl(runtime) !== 'about:blank') return;
+    // Let queued host promises (including fetch completions) settle before
+    // asking Servo to process the next batch of events.
+    await Promise.resolve();
+  }
+  throw new Error(`Servo navigation remained at about:blank after ${maxAttempts} cooperative pump cycles.`);
+}
+
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
   const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression));
   if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
@@ -1121,7 +1137,8 @@ export class ServoBrowserSession extends DurableObject<Env> {
         } else if (options.url && !runtime.loadPage(options.url)) {
           throw new Error('Servo rejected the requested URL.');
         }
-        if (options.url || options.html !== undefined) await pump(runtime);
+        if (options.url) await pumpUntilNavigation(runtime);
+        else if (options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
         if ((options.url || options.html !== undefined) && page.url === 'about:blank') {
           throw new Error('Servo accepted the initial navigation but remained at about:blank; the page was not loaded.');
@@ -1177,7 +1194,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     assertPublicHttpUrl(url);
     return this.operate(async (runtime) => {
       if (!runtime.loadPage(url)) throw new Error('Servo rejected the requested URL.');
-      await pump(runtime);
+      await pumpUntilNavigation(runtime);
       const page = await this.summary(runtime);
       if (page.url === 'about:blank') {
         throw new Error(`Servo accepted navigation to ${url} but remained at about:blank; the page was not loaded.`);
