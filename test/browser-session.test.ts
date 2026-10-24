@@ -738,7 +738,9 @@ describe('operate lifecycle', () => {
     let firstPumpResolve!: () => void;
     const pumpGate = new Promise<void>((resolve) => { firstPumpResolve = resolve; });
     const session = await activeSession({
-      summary: { url: 'https://public.example/x' },
+      summary: () => pumpCalls === 0
+        ? { url: 'https://public.example/x' }
+        : { url: 'https://public.example/page' },
       pumpFactory: () => (pumpCalls++ === 0
         ? pumpGate.then(() => ({ settled: true }))
         : Promise.resolve({ settled: true })),
@@ -758,7 +760,15 @@ describe('operate lifecycle', () => {
   });
 
   it('keeps plain summaries when no fetch failed for the page URL', async () => {
-    const session = await activeSession({ summary: { url: 'https://public.example/page' } });
+    const session = await activeSession({
+      summary: () => pumpCalls === 0
+        ? { url: 'https://public.example/page' }
+        : { url: 'https://public.example/other' },
+      pumpFactory: async () => {
+        pumpCalls++;
+        return { settled: true };
+      },
+    });
     const result = await session.navigate('https://public.example/other');
     expect(result.page.loadError).toBeUndefined();
   });
