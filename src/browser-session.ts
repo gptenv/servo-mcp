@@ -275,7 +275,7 @@ async function pumpUntilNavigation(runtime: ServoRuntime): Promise<void> {
     if (await pageUrl(runtime) !== 'about:blank') return;
     // Let queued host promises (including fetch completions) settle before
     // asking Servo to process the next batch of events.
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
   throw new Error(`Servo navigation remained at about:blank after ${maxAttempts} cooperative pump cycles.`);
 }
