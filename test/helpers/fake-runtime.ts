@@ -59,6 +59,8 @@ export class FakeServoRuntime {
   trapped: boolean;
   private evaluatePageCount = 0;
   private currentUrl = 'about:blank';
+  private documentTimeOrigin = 1;
+  private pendingNavigation: { fromUrl: string; targetUrl: string } | null = null;
   private capturedStorage: Record<string, [string, string][]> = {
     localStorage: [],
     sessionStorage: [],
@@ -139,6 +141,15 @@ export class FakeServoRuntime {
     if (scripted.hit) {
       this.evaluations.push({ script, result: scripted.value });
       return Promise.resolve(scripted.value);
+    }
+    if (script.startsWith('JSON.stringify({url: location.href, timeOrigin: performance.timeOrigin}')) {
+      const summary = this.currentSummary(script);
+      const value = { Ok: { String: JSON.stringify({
+        url: summary.url ?? this.currentUrl,
+        timeOrigin: this.documentTimeOrigin,
+      }) } };
+      this.evaluations.push({ script, result: value });
+      return Promise.resolve(value);
     }
     if (script.startsWith('JSON.stringify({url: location.href')) {
       const value: unknown = { Ok: { String: this.summaryJson(script) } };
@@ -238,16 +249,32 @@ export class FakeServoRuntime {
 
   pumpCooperatively(_opts?: { maxTurns?: number }): Promise<{ ready: boolean; turns: number; pendingFetches: number; timersPending: boolean }> {
     this.calls.push('pump');
-    if (this.options.pumpFactory) return this.options.pumpFactory().then(() => ({ ready: true, turns: 1, pendingFetches: 0, timersPending: false }));
+    const finishPump = () => {
+      if (this.pendingNavigation) {
+        const summary = this.currentSummary('');
+        const url = summary.url ?? this.currentUrl;
+        // The fake treats the requested URL or a changed final URL as a committed document.
+        if (url === this.pendingNavigation.targetUrl || url !== this.pendingNavigation.fromUrl) {
+          this.documentTimeOrigin++;
+          this.pendingNavigation = null;
+        }
+      }
+      const settled = this.options.pumpResult?.settled ?? true;
+      return { ready: true, turns: 1, pendingFetches: settled ? 0 : 1, timersPending: !settled };
+    };
+    if (this.options.pumpFactory) return this.options.pumpFactory().then(finishPump);
     if (this.options.pumpThrows) return Promise.reject(this.options.pumpThrows);
-    const settled = this.options.pumpResult?.settled ?? true;
-    return Promise.resolve({ ready: true, turns: 1, pendingFetches: settled ? 0 : 1, timersPending: !settled });
+    return Promise.resolve(finishPump());
   }
 
   loadPage(url: string): boolean {
     this.calls.push(`loadPage:${url}`);
     const accepted = this.options.loadPageReturns ?? true;
-    if (accepted) this.currentUrl = url;
+    if (accepted) {
+      const fromUrl = this.currentSummary('').url ?? this.currentUrl;
+      this.pendingNavigation = { fromUrl, targetUrl: url };
+      this.currentUrl = url;
+    }
     return accepted;
   }
 
