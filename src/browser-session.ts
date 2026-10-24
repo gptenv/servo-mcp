@@ -1163,7 +1163,8 @@ export class ServoBrowserSession extends DurableObject<Env> {
         if (options.html !== undefined) {
           if (!runtime.loadHtml(options.html)) throw new Error('Servo rejected the supplied HTML document.');
         }
-        if (options.url || options.html !== undefined) await pump(runtime);
+        if (options.url) await pumpUntilNavigation(runtime, { url: 'about:blank', timeOrigin: null });
+        else if (options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
         if ((options.url || options.html !== undefined) && page.url === 'about:blank') {
           throw new Error('Servo accepted the initial navigation but remained at about:blank; the page was not loaded.');
