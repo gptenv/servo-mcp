@@ -264,20 +264,42 @@ async function pump(runtime: ServoRuntime): Promise<void> {
   await runtime.pumpCooperatively({ maxTurns: 2_000 });
 }
 
-// Navigation can enqueue asynchronous network work that outlives one cooperative
-// pump. Do not read the initial about:blank document after a single pump and
-// mistake that transient state for a completed navigation. Keep pumping in
-// bounded chunks so the Worker can service pending fetches between turns.
-async function pumpUntilNavigation(runtime: ServoRuntime): Promise<void> {
+type NavigationState = { url: string; timeOrigin: number | null };
+
+async function pageNavigationState(runtime: ServoRuntime): Promise<NavigationState> {
+  try {
+    const value = parseEvaluationResult(await runtime.evaluate(
+      'JSON.stringify({url: location.href, timeOrigin: performance.timeOrigin})',
+    ));
+    if (typeof value === 'object' && value !== null && 'url' in value
+      && typeof value.url === 'string'
+      && 'timeOrigin' in value
+      && (typeof value.timeOrigin === 'number' || value.timeOrigin === null)) {
+      return { url: value.url, timeOrigin: value.timeOrigin };
+    }
+  } catch {
+    // Older adapters may not expose performance timing; fall back to URL checks.
+  }
+  return { url: await pageUrl(runtime), timeOrigin: null };
+}
+
+// A URL alone is not a navigation-completion signal: on an existing tab it can
+// still describe the previous document while a new navigation is pending.
+// performance.timeOrigin changes on document commits, including same-URL loads.
+async function pumpUntilNavigation(runtime: ServoRuntime, before: NavigationState): Promise<void> {
   const maxAttempts = 30;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await runtime.pumpCooperatively({ maxTurns: 500 });
-    if (await pageUrl(runtime) !== 'about:blank') return;
+    const current = await pageNavigationState(runtime);
+    const documentCommitted = before.timeOrigin !== null && current.timeOrigin !== null
+      ? current.timeOrigin !== before.timeOrigin
+      : current.url !== before.url;
+    if (current.url !== 'about:blank' && documentCommitted) return;
     // Let queued host promises (including fetch completions) settle before
     // asking Servo to process the next batch of events.
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
-  throw new Error(`Servo navigation remained at about:blank after ${maxAttempts} cooperative pump cycles.`);
+  throw new Error(`Servo navigation did not commit after ${maxAttempts} cooperative pump cycles.`);
 }
 
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
@@ -1132,12 +1154,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
         if (options.fontBase64) await this.storeAsset('font:000000', options.fontBase64);
         const runtime = await this.createRuntime(options.width, options.height, options.sessionId);
         this.runtime = runtime;
+        const navigationBefore = options.url ? await pageNavigationState(runtime) : undefined;
         if (options.html !== undefined) {
           if (!runtime.loadHtml(options.html)) throw new Error('Servo rejected the supplied HTML document.');
         } else if (options.url && !runtime.loadPage(options.url)) {
           throw new Error('Servo rejected the requested URL.');
         }
-        if (options.url) await pumpUntilNavigation(runtime);
+        if (options.url && navigationBefore) await pumpUntilNavigation(runtime, navigationBefore);
         else if (options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
         if ((options.url || options.html !== undefined) && page.url === 'about:blank') {
@@ -1193,8 +1216,9 @@ export class ServoBrowserSession extends DurableObject<Env> {
   async navigate(url: string): Promise<BrowserActionResult> {
     assertPublicHttpUrl(url);
     return this.operate(async (runtime) => {
+      const navigationBefore = await pageNavigationState(runtime);
       if (!runtime.loadPage(url)) throw new Error('Servo rejected the requested URL.');
-      await pumpUntilNavigation(runtime);
+      await pumpUntilNavigation(runtime, navigationBefore);
       const page = await this.summary(runtime);
       if (page.url === 'about:blank') {
         throw new Error(`Servo accepted navigation to ${url} but remained at about:blank; the page was not loaded.`);
