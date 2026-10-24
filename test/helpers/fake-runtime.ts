@@ -71,6 +71,12 @@ export class FakeServoRuntime {
     this.trapped = options.trapped ?? false;
   }
 
+  setInitialUrl(url: string): void {
+    this.currentUrl = url;
+    this.pendingNavigation = null;
+    this.documentTimeOrigin++;
+  }
+
   private resumeStep(): ResumeStateScript {
     const script = this.options.resumeState;
     // Always advance the step counter, even when no steps are scripted, so

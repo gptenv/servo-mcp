@@ -31,6 +31,7 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   // Snapshot the scripted options at creation time so later mutations cannot
   // retroactively change an already-running session's behaviour.
   const runtime = new FakeServoRuntime({ ...runtimeOptionsHolder.options });
+  if (typeof config.url === 'string') runtime.setInitialUrl(config.url);
   runtimeConfigs.push(config);
   createdRuntimes.push(runtime);
   return runtime;
@@ -293,7 +294,8 @@ describe('initialize', () => {
     scriptRuntime({ summary: { url: 'https://public.example/page', title: 'Public', text: 'text' } });
     const session = await newSession();
     await session.initialize(initOptions({ url: 'https://public.example/page' }));
-    expect(lastRuntimeCalls()).toContain('loadPage:https://public.example/page');
+    expect(runtimeConfigs[0].url).toBe('https://public.example/page');
+    expect(lastRuntimeCalls()).not.toContain('loadPage:https://public.example/page');
   });
 
   it('fails loudly when a requested navigation remains at about:blank', async () => {
@@ -349,10 +351,10 @@ describe('initialize', () => {
     await expect(session.initialize(initOptions())).rejects.toBe('boom');
   });
 
-  it('reports when Servo refuses the requested URL', async () => {
-    scriptRuntime({ loadPageReturns: false });
+  it('propagates runtime creation failures when initializing a requested URL', async () => {
+    createServoWorkerRuntime.mockRejectedValueOnce(new Error('runtime creation failed'));
     const session = await newSession();
-    await expect(session.initialize(initOptions({ url: 'https://public.example/' }))).rejects.toThrow(/rejected the requested URL/);
+    await expect(session.initialize(initOptions({ url: 'https://public.example/' }))).rejects.toThrow('runtime creation failed');
   });
 
   it('processes an initial load cooperatively without requiring idle settlement', async () => {
