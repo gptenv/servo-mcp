@@ -281,6 +281,11 @@ async function pump(runtime: ServoRuntime): Promise<void> {
   await runtime.pumpCooperatively({ maxTurns: 2_000 });
 }
 
+async function awaitReady(runtime: ServoRuntime, readiness: PageReadinessOptions = {}): Promise<void> {
+  const result = await runtime.waitForPageReady(readiness);
+  if (!result.ready) throw new Error('Servo document readiness timed out.');
+}
+
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
   const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression));
   if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
@@ -916,6 +921,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     if (restored.hasStorage || restored.hasCookies || restored.hasIndexedDBState || restored.indexedDatabases) {
       if (!runtime.reload()) throw new Error('Servo could not reload after restoring this tab origin.');
       await pump(runtime);
+      await awaitReady(runtime);
       await this.applySavedState(runtime, snapshot, url, true);
     }
   }
@@ -970,8 +976,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (!isBlankDocument) {
         const commit = await runtime.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
         if (!commit.committed) throw new Error('Saved document navigation did not commit.');
-        const ready = await runtime.waitForPageReady();
-        if (!ready.ready) throw new Error('Saved document readiness timed out.');
+        await awaitReady(runtime);
         restored = await this.applySavedState(runtime, snapshot, snapshot.url);
       }
       // Give restored storage and script-visible cookies a chance to initialize
@@ -1212,8 +1217,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
-  async inspect(): Promise<PageSummary> {
-    return this.operate((runtime) => this.summary(runtime));
+  async inspect(readiness: PageReadinessOptions = {}): Promise<PageSummary> {
+    return this.operate(async (runtime) => {
+      await awaitReady(runtime, readiness);
+      return this.summary(runtime);
+    });
   }
 
   async wait(): Promise<PageSummary> {
@@ -1231,58 +1239,60 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
-  async click(x: number, y: number, button = 0): Promise<BrowserActionResult> {
+  async click(x: number, y: number, button = 0, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.click(x, y, button);
       await pump(runtime);
+      await awaitReady(runtime, readiness);
       return { action: 'click', page: await this.summary(runtime) };
     });
   }
 
-  async typeText(text: string): Promise<BrowserActionResult> {
+  async typeText(text: string, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.typeText(text);
       await pump(runtime);
+      await awaitReady(runtime, readiness);
       return { action: 'type', page: await this.summary(runtime) };
     });
   }
 
-  async pressKey(key: string): Promise<BrowserActionResult> {
+  async pressKey(key: string, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.pressKey(key);
       await pump(runtime);
+      await awaitReady(runtime, readiness);
       return { action: 'key', page: await this.summary(runtime) };
     });
   }
 
-  async scroll(deltaX: number, deltaY: number, x?: number, y?: number): Promise<BrowserActionResult> {
+  async scroll(deltaX: number, deltaY: number, x?: number, y?: number, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       runtime.scrollBy(deltaX, deltaY, { x, y });
       await pump(runtime);
+      await awaitReady(runtime, readiness);
       return { action: 'scroll', page: await this.summary(runtime) };
     });
   }
 
-  async history(direction: 'back' | 'forward'): Promise<BrowserActionResult> {
+  async history(direction: 'back' | 'forward', readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       const navigated = direction === 'back' ? runtime.goBack() : runtime.goForward();
       if (navigated) {
         await pump(runtime);
-        const ready = await runtime.waitForPageReady();
-        if (!ready.ready) throw new Error('History document readiness timed out.');
+        await awaitReady(runtime, readiness);
       }
       return { action: direction, page: await this.summary(runtime) };
     });
   }
 
-  async reload(): Promise<BrowserActionResult> {
+  async reload(readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       const before = await runtime.navigationIdentity();
       if (!runtime.reload()) throw new Error('Servo could not reload the current page.');
       const committed = await runtime.waitForNavigationCommit(before);
       if (!committed.committed) throw new Error('Servo reload did not commit a document.');
-      const ready = await runtime.waitForPageReady();
-      if (!ready.ready) throw new Error('Reload document readiness timed out.');
+      await awaitReady(runtime, readiness);
       return { action: 'reload', page: await this.summary(runtime) };
     });
   }
