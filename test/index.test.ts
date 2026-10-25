@@ -379,6 +379,39 @@ describe('focused browser tools', () => {
     expect(defaultSession.navigateHtml).toHaveBeenCalledWith('<p>Updated</p>');
   });
 
+
+  it('configures core readiness through existing navigation and capture actions', async () => {
+    const readiness = { strategy: 'domquiet', quietMs: 150, networkIdleMs: 250,
+      maxDurationMs: 3000, selector: '.page-ready' };
+    const options = { sessionId, url: 'https://example.com/', readiness };
+    const navigation = structured(await invoke('servo_navigate', browserInput([options])));
+    expect(navigation.responses[0].ok).toBe(true);
+    expect(defaultSession.navigate).toHaveBeenCalledWith('https://example.com/', readiness);
+
+    const shot = structured(await invoke('servo_screenshot', browserInput([
+      { sessionId, fullPage: true, readiness },
+    ])));
+    expect(shot.responses[0].ok).toBe(true);
+    expect(defaultSession.screenshot).toHaveBeenCalledWith(true, readiness);
+
+    const recording = structured(await invoke('servo_recording_start', browserInput([
+      { sessionId, fps: 2, maxDurationSeconds: 6, readiness },
+    ])));
+    expect(recording.responses[0].ok).toBe(true);
+    expect(defaultSession.startScreenRecording).toHaveBeenCalledWith(2, 6, readiness);
+
+    const clicked = structured(await invoke('servo_click', browserInput([
+      { sessionId, x: 4, y: 10, readiness },
+    ])));
+    expect(clicked.responses[0].ok).toBe(true);
+    expect(defaultSession.click).toHaveBeenCalledWith(4, 10, 0, readiness);
+
+    const bad = structured(await invoke('servo_navigate', browserInput([
+      { sessionId, url: 'https://example.com/', readiness: { strategy: 'sleep' } },
+    ])));
+    expect(bad.responses[0].ok).toBe(false);
+  });
+
   it('routes recording start, stop, status, and download tools', async () => {
     const recordingId = '00000000-0000-4000-8000-000000000003';
     const started = structured(await invoke('servo_recording_start', browserInput([{ sessionId, fps: 3, maxDurationSeconds: 12 }])));

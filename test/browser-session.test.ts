@@ -798,6 +798,17 @@ describe('operate lifecycle', () => {
     await expect(session.navigate('https://public.example/')).rejects.toThrow(/rejected the requested URL/);
   });
 
+
+  it('does not return page contents or start recording when core readiness fails', async () => {
+    const session = await activeSession({
+      summary: { url: 'https://public.example/page', title: 'P', text: 'loading...' },
+      pageReadyResult: { ready: false, reason: 'timeout' },
+    });
+    await expect(session.inspect()).rejects.toThrow(/readiness timed out/i);
+    await expect(session.click(10, 10)).rejects.toThrow(/readiness timed out/i);
+    await expect(session.startScreenRecording(2, 4)).rejects.toThrow(/readiness timed out/i);
+  });
+
   it('runs inspect, wait, click, typeText, pressKey, scroll, history, reload, screenshot, capabilities', async () => {
     const png = new Uint8Array([9, 8, 7]);
     const session = await activeSession({ summary: { url: 'https://public.example/page', title: 'P', text: 'T' }, screenshotPng: png, capabilitiesValue: { ok: 1 } });
