@@ -1250,17 +1250,19 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
-  async wait(): Promise<PageSummary> {
+  async wait(readiness: PageReadinessOptions = {}): Promise<PageSummary> {
     return this.operate(async (runtime) => {
       await pump(runtime);
+      await awaitReady(runtime, readiness);
       return this.summary(runtime);
     });
   }
 
-  async evaluate(script: string): Promise<{ value: unknown; page: PageSummary }> {
+  async evaluate(script: string, readiness: PageReadinessOptions = {}): Promise<{ value: unknown; page: PageSummary }> {
     if (new TextEncoder().encode(script).byteLength > MAX_SCRIPT_BYTES) throw new RangeError('Script exceeds 64 KiB.');
     return this.operate(async (runtime) => {
       const value = await runtime.evaluate(script);
+      await awaitReady(runtime, readiness);
       return { value, page: await this.summary(runtime) };
     });
   }

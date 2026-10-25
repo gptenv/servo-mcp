@@ -35,7 +35,7 @@ const navigateSchema = multiSession({
   url: z.string().url().max(2048).optional(),
   html: z.string().max(1 * 1024 * 1024).optional(),
   });
-const evaluateSchema = multiSession({ script: z.string().max(MAX_SCRIPT_BYTES) });
+const evaluateSchema = multiSession({ script: z.string().max(MAX_SCRIPT_BYTES), readiness: readinessSchema.optional() });
 const clickSchema = multiSession({
   readiness: readinessSchema.optional(),
   x: z.number().finite(), y: z.number().finite(), button: z.number().int().min(0).max(4).default(0),
@@ -48,7 +48,8 @@ const scrollSchema = multiSession({
   });
 const historySchema = multiSession({ direction: z.enum(['back', 'forward']), readiness: readinessSchema.optional() });
 const waitSchema = multiSession({
-  });
+  readiness: readinessSchema.optional(),
+});
 const screenshotSchema = multiSession({
   fullPage: z.boolean().default(false),
   readiness: readinessSchema.optional(),
@@ -231,7 +232,7 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_navigate', {
     title: 'Servo navigate',
-    description: 'Load a public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. Each actions entry has its own load budget; private/local network addresses are blocked.',
+    description: 'Load and wait for a ready public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. Each actions entry has its own load budget; private/local network addresses are blocked.',
     inputSchema: navigateSchema,
     _meta: browserUiMeta,
   }, async (input) => safely(async () => runSessions(input, async (browser, group, created) => {
@@ -287,7 +288,7 @@ function createServer(env: Env, publicOrigin: string) {
     description: 'Evaluate a JavaScript expression in each selected page in parallel. Every entry carries its own script and budget. If the script returns a promise, it is awaited within the budget. Each action returns a response with a WebDriver-style JSON clone, such as {"Ok":{"String":"…"}} or {"Err":…}; return JSON.stringify(value) for complex data. Scripts can modify pages or cause external effects.',
     inputSchema: evaluateSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.evaluate(group.script))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => group.readiness ? browser.evaluate(group.script, group.readiness) : browser.evaluate(group.script))));
 
   server.registerTool('servo_click', {
     title: 'Servo click',
@@ -326,21 +327,21 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_reload', {
     title: 'Servo reload',
-    description: 'Reload multiple selected tabs in parallel and process pending browser events without waiting for network or timer idle.',
+    description: 'Reload selected tabs and return only after Servo confirms a committed document and its default DOM-readiness condition. Supports optional per-action readiness overrides.',
     inputSchema: multiSession({ readiness: readinessSchema.optional() }),
     _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => (group.readiness ? browser.reload(group.readiness) : browser.reload()))));
 
   server.registerTool('servo_wait', {
     title: 'Servo wait',
-    description: 'Let multiple selected pages process browser timers and pending network work in parallel, without requiring the page to become globally idle.',
+    description: 'Wait on the core Servo document-readiness detector (DOM quiet across open shadow roots and same-origin iframes, with network-idle fallback). Accepts optional per-action readiness overrides; does not wait forever for active timers.',
     inputSchema: waitSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.wait())));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => group.readiness ? browser.wait(group.readiness) : browser.wait())));
 
   server.registerTool('servo_screenshot', {
     title: 'Servo screenshot',
-    description: 'Capture viewport or full-page screenshots with an actions array of objects, each carrying an optional sessionID. Returns an ordered responses array; imageIndex maps each response to its screenshot image block.',
+    description: 'Capture ready viewport or full-page screenshots with optional per-action DOM-readiness overrides and an actions array of objects, each carrying an optional sessionID. Returns an ordered responses array; imageIndex maps each response to its screenshot image block.',
     inputSchema: screenshotSchema,
     _meta: browserUiMeta,
   }, async (input) => safely(async () => {
@@ -355,7 +356,7 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_recording_start', {
     title: 'Servo recording start',
-    description: 'Start asynchronous screen recording with an actions array of objects, each carrying an optional sessionID. Captures a downscaled viewport as H.264 MP4 at 1–3 fps, without audio. The Durable Object remains active during recording; the default maximum is 30 seconds and the hard limit is 60 seconds. Returns a recordingId for stop, status, and download calls.',
+    description: 'Start asynchronous screen recording after the page is ready, with optional per-action readiness overrides and an actions array of objects, each carrying an optional sessionID. Captures a downscaled viewport as H.264 MP4 at 1–3 fps, without audio. The Durable Object remains active during recording; the default maximum is 30 seconds and the hard limit is 60 seconds. Returns a recordingId for stop, status, and download calls.',
     inputSchema: recordingStartSchema,
     _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) =>
