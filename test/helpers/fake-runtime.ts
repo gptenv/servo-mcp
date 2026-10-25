@@ -317,7 +317,7 @@ export class FakeServoRuntime {
   }
 
   async navigateHtml(html: string, options?: { url?: string; readiness?: unknown }): Promise<{ ready: boolean; reason: string }> {
-    if (!this.loadHtml(html, { url: options?.url })) throw new Error('Servo rejected supplied HTML');
+    if (!this.loadHtml(html, { url: options?.url })) throw new Error('Servo rejected the supplied HTML');
     this.currentUrl = options?.url ?? 'https://servo-inline.invalid/';
     this.documentTimeOrigin++;
     await this.pumpCooperatively();
@@ -345,7 +345,12 @@ export class FakeServoRuntime {
 
   reload(): boolean {
     this.calls.push('reload');
-    return this.options.reloadReturns ?? true;
+    const accepted = this.options.reloadReturns ?? true;
+    if (accepted) {
+      const current = this.currentSummary('').url ?? this.currentUrl;
+      this.pendingNavigation = { fromUrl: current, targetUrl: current };
+    }
+    return accepted;
   }
 
   goBack(): boolean {

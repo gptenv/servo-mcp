@@ -406,10 +406,9 @@ describe('focused browser tools', () => {
     expect(clicked.responses[0].ok).toBe(true);
     expect(defaultSession.click).toHaveBeenCalledWith(4, 10, 0, readiness);
 
-    const bad = structured(await invoke('servo_navigate', browserInput([
+    await expect(invoke('servo_navigate', browserInput([
       { sessionId, url: 'https://example.com/', readiness: { strategy: 'sleep' } },
-    ])));
-    expect(bad.responses[0].ok).toBe(false);
+    ]))).rejects.toThrow();
   });
 
   it('routes recording start, stop, status, and download tools', async () => {
