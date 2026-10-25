@@ -1208,7 +1208,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   async navigateHtml(html: string, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     if (new TextEncoder().encode(html).byteLength > MAX_PERSISTED_HTML_BYTES) {
-      throw new RangeError('Inline HTML exceeds the resumable-session limit.');
+      throw new RangeError(`Inline HTML exceeds ${MAX_PERSISTED_HTML_BYTES} UTF-8 bytes, the resumable-session limit.`);
     }
     return this.operate(async (runtime) => {
       await runtime.navigateHtml(html, { readiness });

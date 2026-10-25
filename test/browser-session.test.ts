@@ -435,7 +435,7 @@ describe('initialize', () => {
     const splitSurrogateValue = `${'x'.repeat(32_767)}🙂tail`;
     localStorage.push(['unicode-value', splitSurrogateValue]);
     scriptRuntime({
-      summary: { url: 'about:blank', title: 't', text: '' },
+      summary: { url: 'https://public.example/page', title: 't', text: '' },
       evaluations: {
         [RESUME_MARKER]: okString({
           ...validResumeState,
