@@ -188,6 +188,15 @@ type IndexedDatabaseSnapshot = {
 };
 type EncodedGraph = { root: unknown; nodes: Array<Record<string, unknown> | null> };
 
+export type PageReadinessOptions = {
+  strategy?: 'none' | 'commit' | 'load' | 'domquiet' | 'networkidle';
+  quietMs?: number;
+  networkIdleMs?: number;
+  maxDurationMs?: number;
+  pollIntervalMs?: number;
+  selector?: string;
+};
+
 export const browserSessionOptionsSchema = z.object({
   sessionId: z.string().uuid(),
   url: z.string().url().max(2048).optional(),
@@ -195,6 +204,14 @@ export const browserSessionOptionsSchema = z.object({
   width: z.number().int().min(320).max(1920).default(1280),
   height: z.number().int().min(240).max(1600).default(720),
   fontBase64: z.string().max(44_739_244).optional(),
+  readiness: z.object({
+    strategy: z.enum(['none', 'commit', 'load', 'domquiet', 'networkidle']).optional(),
+    quietMs: z.number().finite().nonnegative().optional(),
+    networkIdleMs: z.number().finite().nonnegative().optional(),
+    maxDurationMs: z.number().finite().positive().optional(),
+    pollIntervalMs: z.number().finite().positive().optional(),
+    selector: z.string().min(1).max(2048).optional(),
+  }).optional(),
 }).refine((value) => !(value.url && value.html !== undefined), {
   message: 'Provide a URL or inline HTML, not both.',
 });
@@ -262,49 +279,6 @@ function publicWebSocket(url: string, protocols?: string | string[]): WebSocket 
 
 async function pump(runtime: ServoRuntime): Promise<void> {
   await runtime.pumpCooperatively({ maxTurns: 2_000 });
-}
-
-type NavigationState = { url: string; timeOrigin: number | null };
-
-async function pageNavigationState(runtime: ServoRuntime): Promise<NavigationState> {
-  try {
-    const value = parseEvaluationResult(await runtime.evaluate(
-      'JSON.stringify({url: location.href, timeOrigin: performance.timeOrigin})',
-    ));
-    if (typeof value === 'object' && value !== null && 'url' in value
-      && typeof value.url === 'string'
-      && 'timeOrigin' in value
-      && (typeof value.timeOrigin === 'number' || value.timeOrigin === null)) {
-      return { url: value.url, timeOrigin: value.timeOrigin };
-    }
-  } catch {
-    // Older adapters may not expose performance timing; fall back to URL checks.
-  }
-  return { url: await pageUrl(runtime), timeOrigin: null };
-}
-
-// A URL alone is not a navigation-completion signal: on an existing tab it can
-// still describe the previous document while a new navigation is pending.
-// performance.timeOrigin changes on document commits, including same-URL loads.
-async function pumpUntilNavigation(runtime: ServoRuntime, before: NavigationState): Promise<void> {
-  const maxAttempts = 30;
-  let lastUrl = before.url;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await runtime.pumpCooperatively({ maxTurns: 500 });
-    const current = await pageNavigationState(runtime);
-    lastUrl = current.url;
-    const documentCommitted = before.timeOrigin !== null && current.timeOrigin !== null
-      ? current.timeOrigin !== before.timeOrigin
-      : current.url !== before.url;
-    if (current.url !== 'about:blank' && documentCommitted) return;
-    // Let queued host promises (including fetch completions) settle before
-    // asking Servo to process the next batch of events.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  }
-  if (lastUrl === 'about:blank') {
-    throw new Error(`Servo navigation remained at about:blank after ${maxAttempts} cooperative pump cycles.`);
-  }
-  throw new Error(`Servo navigation did not commit after ${maxAttempts} cooperative pump cycles.`);
 }
 
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
@@ -947,11 +921,12 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   // URL-based initialization passes its URL to the adapter bootstrap; do not queue a second loadPage().
-  private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank'): Promise<ServoRuntime> {
+  private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank', readiness?: PageReadinessOptions): Promise<ServoRuntime> {
     const runtime = await createServoWorkerRuntime(servoWasm, {
       width,
       height,
       url: initialUrl,
+      readiness: readiness ?? {},
       fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(input, init).catch((error: unknown) => {
         const url = input instanceof Request ? input.url : String(input);
         this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
@@ -993,7 +968,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (!loaded) throw new Error('Servo could not reopen the saved tab URL.');
       let restored: { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number } | undefined;
       if (!isBlankDocument) {
-        await pump(runtime);
+        const commit = await runtime.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
+        if (!commit.committed) throw new Error('Saved document navigation did not commit.');
+        const ready = await runtime.waitForPageReady();
+        if (!ready.ready) throw new Error('Saved document readiness timed out.');
         restored = await this.applySavedState(runtime, snapshot, snapshot.url);
       }
       // Give restored storage and script-visible cookies a chance to initialize
@@ -1158,13 +1136,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
       try {
         if (options.html !== undefined) await this.storeAsset('initial-html', options.html);
         if (options.fontBase64) await this.storeAsset('font:000000', options.fontBase64);
-        const runtime = await this.createRuntime(options.width, options.height, options.sessionId, undefined, options.url ?? 'about:blank');
+        const runtime = await this.createRuntime(options.width, options.height, options.sessionId, undefined, options.url ?? 'about:blank', options.readiness);
         this.runtime = runtime;
         if (options.html !== undefined) {
-          if (!runtime.loadHtml(options.html)) throw new Error('Servo rejected the supplied HTML document.');
+          await runtime.navigateHtml(options.html, { readiness: options.readiness ?? {} });
         }
-        if (options.url) await pumpUntilNavigation(runtime, { url: 'about:blank', timeOrigin: null });
-        else if (options.html !== undefined) await pump(runtime);
         const page = await this.summary(runtime);
         if ((options.url || options.html !== undefined) && page.url === 'about:blank') {
           throw new Error('Servo accepted the initial navigation but remained at about:blank; the page was not loaded.');
@@ -1216,33 +1192,23 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
-  async navigate(url: string): Promise<BrowserActionResult> {
+  async navigate(url: string, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     assertPublicHttpUrl(url);
     return this.operate(async (runtime) => {
-      const navigationBefore = await pageNavigationState(runtime);
-      if (!runtime.loadPage(url)) throw new Error('Servo rejected the requested URL.');
-      await pumpUntilNavigation(runtime, navigationBefore);
+      await runtime.navigate(url, readiness);
       const page = await this.summary(runtime);
-      if (page.url === 'about:blank') {
-        throw new Error(`Servo accepted navigation to ${url} but remained at about:blank; the page was not loaded.`);
-      }
       return { action: 'navigate', page };
     });
   }
 
-  async navigateHtml(html: string): Promise<BrowserActionResult> {
+  async navigateHtml(html: string, readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     if (new TextEncoder().encode(html).byteLength > MAX_PERSISTED_HTML_BYTES) {
-      throw new RangeError(`Inline HTML exceeds ${MAX_PERSISTED_HTML_BYTES} UTF-8 bytes, the resumable-session limit.`);
+      throw new RangeError('Inline HTML exceeds the resumable-session limit.');
     }
     return this.operate(async (runtime) => {
-      if (!runtime.loadHtml(html)) throw new Error('Servo rejected the supplied HTML document.');
+      await runtime.navigateHtml(html, { readiness });
       await this.storeAsset('initial-html', html);
-      await pump(runtime);
-      const page = await this.summary(runtime);
-      if (page.url === 'about:blank') {
-        throw new Error('Servo accepted inline HTML but remained at about:blank; the document was not loaded.');
-      }
-      return { action: 'navigate', page };
+      return { action: 'navigate', page: await this.summary(runtime) };
     });
   }
 
@@ -1300,24 +1266,32 @@ export class ServoBrowserSession extends DurableObject<Env> {
   async history(direction: 'back' | 'forward'): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
       const navigated = direction === 'back' ? runtime.goBack() : runtime.goForward();
-      if (navigated) await pump(runtime);
+      if (navigated) {
+        await pump(runtime);
+        const ready = await runtime.waitForPageReady();
+        if (!ready.ready) throw new Error('History document readiness timed out.');
+      }
       return { action: direction, page: await this.summary(runtime) };
     });
   }
 
   async reload(): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
+      const before = await runtime.navigationIdentity();
       if (!runtime.reload()) throw new Error('Servo could not reload the current page.');
-      await pump(runtime);
+      const committed = await runtime.waitForNavigationCommit(before);
+      if (!committed.committed) throw new Error('Servo reload did not commit a document.');
+      const ready = await runtime.waitForPageReady();
+      if (!ready.ready) throw new Error('Reload document readiness timed out.');
       return { action: 'reload', page: await this.summary(runtime) };
     });
   }
 
-  async screenshot(fullPage = false): Promise<{ page: PageSummary; png: Uint8Array }> {
-    return this.operate(async (runtime) => ({
-      page: await this.summary(runtime),
-      png: await runtime.screenshot({ fullPage }),
-    }));
+  async screenshot(fullPage = false, readiness: PageReadinessOptions = {}): Promise<{ page: PageSummary; png: Uint8Array }> {
+    return this.operate(async (runtime) => {
+      const png = await runtime.screenshot({ fullPage, readiness });
+      return { page: await this.summary(runtime), png };
+    });
   }
 
   private async finalizeRecording(recordingId: string): Promise<void> {
@@ -1378,7 +1352,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }
   }
 
-  async startScreenRecording(fps = 2, maxDurationSeconds = 30): Promise<{
+  async startScreenRecording(fps = 2, maxDurationSeconds = 30, readiness: PageReadinessOptions = {}): Promise<{
     recordingId: string; status: RecordingStatus; fps: number; maxDurationSeconds: number; startedAt: number;
   }> {
     return this.serial(async () => {
@@ -1392,7 +1366,9 @@ export class ServoBrowserSession extends DurableObject<Env> {
         "SELECT id FROM browser_recording WHERE status IN ('recording', 'encoding') LIMIT 1",
       ).toArray()[0];
       if (inProgress) throw new Error('This tab already has a recording in progress.');
-      await this.requireRuntime();
+      const runtime = await this.requireRuntime();
+      const ready = await runtime.waitForPageReady(readiness);
+      if (!ready.ready) throw new Error('Recording startup document readiness timed out.');
       const recordingId = crypto.randomUUID();
       const startedAt = Date.now();
       const maxDurationMs = maxDurationSeconds * 1000;
