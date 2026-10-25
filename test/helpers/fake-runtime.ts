@@ -33,6 +33,7 @@ export interface FakeRuntimeOptions {
   pumpThrows?: Error;
   screenshotPng?: Uint8Array;
   screenshotThrows?: Error;
+  pageReadyResult?: { ready: boolean; reason?: string };
   capabilitiesValue?: unknown;
   registerFontFaces?: number;
   resetThrows?: boolean;
@@ -271,6 +272,58 @@ export class FakeServoRuntime {
     if (this.options.pumpFactory) return this.options.pumpFactory().then(finishPump);
     if (this.options.pumpThrows) return Promise.reject(this.options.pumpThrows);
     return Promise.resolve(finishPump());
+  }
+
+
+  navigationIdentity(): Promise<{ url: string; timeOrigin: number }> {
+    const url = this.currentSummary('').url ?? this.currentUrl;
+    this.calls.push('navigationIdentity');
+    return Promise.resolve({ url, timeOrigin: this.documentTimeOrigin });
+  }
+
+  async waitForNavigationCommit(
+    before: { url: string; timeOrigin: number | null },
+    _opts?: { maxDurationMs?: number },
+  ): Promise<{ committed: boolean; url: string }> {
+    this.calls.push('waitForNavigationCommit');
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await this.pumpCooperatively();
+      const current = await this.navigationIdentity();
+      if (current.url !== 'about:blank' &&
+          (before.timeOrigin === null
+            ? current.url !== before.url
+            : current.timeOrigin !== before.timeOrigin)) {
+        return { committed: true, url: current.url };
+      }
+      await Promise.resolve();
+    }
+    return { committed: false, url: (await this.navigationIdentity()).url };
+  }
+
+  async waitForPageReady(_options?: unknown): Promise<{ ready: boolean; reason: string }> {
+    this.calls.push('waitForPageReady');
+    return { ready: this.options.pageReadyResult?.ready ?? true,
+      reason: this.options.pageReadyResult?.reason ?? 'domquiet' };
+  }
+
+  async navigate(url: string, options?: unknown): Promise<{ ready: boolean; reason: string }> {
+    const before = await this.navigationIdentity();
+    if (!this.loadPage(url)) throw new Error('Servo rejected the requested URL');
+    const commit = await this.waitForNavigationCommit(before);
+    if (!commit.committed) throw new Error('Navigation did not commit: ' + commit.url);
+    const ready = await this.waitForPageReady(options);
+    if (!ready.ready) throw new Error('Document readiness timed out: ' + ready.reason);
+    return ready;
+  }
+
+  async navigateHtml(html: string, options?: { url?: string; readiness?: unknown }): Promise<{ ready: boolean; reason: string }> {
+    if (!this.loadHtml(html, { url: options?.url })) throw new Error('Servo rejected supplied HTML');
+    this.currentUrl = options?.url ?? 'https://servo-inline.invalid/';
+    this.documentTimeOrigin++;
+    await this.pumpCooperatively();
+    const ready = await this.waitForPageReady(options?.readiness);
+    if (!ready.ready) throw new Error('Inline document readiness timed out');
+    return ready;
   }
 
   loadPage(url: string): boolean {
