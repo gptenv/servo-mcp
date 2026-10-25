@@ -31,7 +31,15 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   // Snapshot the scripted options at creation time so later mutations cannot
   // retroactively change an already-running session's behaviour.
   const runtime = new FakeServoRuntime({ ...runtimeOptionsHolder.options });
-  if (typeof config.url === 'string') runtime.setInitialUrl(config.url);
+  if (typeof config.url === 'string') {
+    runtime.setInitialUrl(config.url);
+    // The real core adapter pumps and waits for the initial navigation before
+    // returning; the fake must model that boundary too, not return too early.
+    if (config.url !== 'about:blank') {
+      await runtime.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
+      await runtime.waitForPageReady(config.readiness);
+    }
+  }
   runtimeConfigs.push(config);
   createdRuntimes.push(runtime);
   return runtime;
