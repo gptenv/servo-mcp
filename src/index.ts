@@ -4,7 +4,7 @@ import { z } from 'zod';
 import widgetHtml from './browser-widget.html';
 import searchWidgetHtml from './search-widget.html';
 import { searchWeb } from './web-search';
-import { ServoBrowserSession } from './browser-session';
+import { ServoBrowserSession, type PageReadinessOptions } from './browser-session';
 import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
 
@@ -21,33 +21,47 @@ const multiSession = <T extends z.ZodRawShape>(shape: T) => z.object({
     height: z.number().int().min(240).max(1600).optional().describe('Initial viewport height for a new tab only; defaults to 720.'),
   }).extend(shape).strict()).min(1).max(20),
 }).strict();
+const readinessSchema = z.object({
+  strategy: z.enum(['none', 'commit', 'load', 'domquiet', 'networkidle']).optional(),
+  quietMs: z.number().finite().nonnegative().max(30_000).optional(),
+  networkIdleMs: z.number().finite().nonnegative().max(30_000).optional(),
+  maxDurationMs: z.number().finite().positive().max(30_000).optional(),
+  pollIntervalMs: z.number().finite().positive().max(1_000).optional(),
+  selector: z.string().min(1).max(2048).optional(),
+}).strict().describe('Optional Servo Worker document readiness override. Default: observe DOM mutations in open shadow roots and same-origin iframes, with bounded network-idle fallback.');
+
 const navigateSchema = multiSession({
+  readiness: readinessSchema.optional(),
   url: z.string().url().max(2048).optional(),
   html: z.string().max(1 * 1024 * 1024).optional(),
   });
 const evaluateSchema = multiSession({ script: z.string().max(MAX_SCRIPT_BYTES) });
 const clickSchema = multiSession({
+  readiness: readinessSchema.optional(),
   x: z.number().finite(), y: z.number().finite(), button: z.number().int().min(0).max(4).default(0),
   });
-const typeTextSchema = multiSession({ text: z.string().max(4096) });
-const keySchema = multiSession({ key: z.string().min(1).max(64) });
+const typeTextSchema = multiSession({ text: z.string().max(4096), readiness: readinessSchema.optional() });
+const keySchema = multiSession({ key: z.string().min(1).max(64), readiness: readinessSchema.optional() });
 const scrollSchema = multiSession({
+  readiness: readinessSchema.optional(),
   deltaX: z.number().finite(), deltaY: z.number().finite(), x: z.number().finite().optional(), y: z.number().finite().optional(),
   });
-const historySchema = multiSession({ direction: z.enum(['back', 'forward']) });
+const historySchema = multiSession({ direction: z.enum(['back', 'forward']), readiness: readinessSchema.optional() });
 const waitSchema = multiSession({
   });
 const screenshotSchema = multiSession({
   fullPage: z.boolean().default(false),
+  readiness: readinessSchema.optional(),
 });
 const recordingStartSchema = multiSession({
+  readiness: readinessSchema.optional(),
   fps: z.number().int().min(1).max(3).default(2),
   maxDurationSeconds: z.number().int().min(1).max(60).default(30),
 });
 const recordingIdSchema = multiSession({ recordingId: z.string().uuid() });
 const registerFontSchema = multiSession({ fontBase64: z.string().min(1).max(MAX_FONT_BASE64_BYTES) });
 const capabilitiesSchema = multiSession({});
-const inspectSchema = multiSession({});
+const inspectSchema = multiSession({ readiness: readinessSchema.optional() });
 
 function toBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -169,7 +183,7 @@ function createServer(env: Env, publicOrigin: string) {
   const runSessions = async <T extends SessionGroup, R>(
     input: SessionInput<T & { sessionID?: string | null | false | 0 | '' }>,
     operation: (browser: ReturnType<typeof session>, group: T & { sessionId: string }, created: boolean) => Promise<R>,
-    initialOptions: (group: T) => { url?: string; html?: string } = () => ({}),
+    initialOptions: (group: T) => { url?: string; html?: string; readiness?: PageReadinessOptions } = () => ({}),
   ) => {
     const idCounts = new Map<string, number>();
     for (const { sessionID } of input.actions) if (sessionID) idCounts.set(sessionID, (idCounts.get(sessionID) ?? 0) + 1);
@@ -224,15 +238,15 @@ function createServer(env: Env, publicOrigin: string) {
     // Initialization already loads new tabs; do not execute navigation twice.
     if (created) return withWebResult({ action: 'navigate', page: await browser.inspect() });
     return withWebResult(group.html !== undefined
-      ? await browser.navigateHtml(group.html)
-      : await browser.navigate(group.url!));
+      ? await browser.navigateHtml(group.html, group.readiness)
+      : await browser.navigate(group.url!, group.readiness));
   }, (group) => {
     if ((group.url === undefined) === (group.html === undefined)) throw new TypeError('Provide a URL or inline HTML, not both.');
     if (group.url) assertPublicHttpUrl(group.url);
     if (group.html !== undefined && new TextEncoder().encode(group.html).byteLength > 1 * 1024 * 1024) {
       throw new RangeError('Inline HTML exceeds 1048576 UTF-8 bytes, the resumable-session limit.');
     }
-    return { url: group.url, html: group.html };
+    return { url: group.url, html: group.html, readiness: group.readiness };
   })));
 
   server.registerTool('servo_inspect', {
@@ -241,7 +255,7 @@ function createServer(env: Env, publicOrigin: string) {
     inputSchema: inspectSchema,
     _meta: browserUiMeta,
   }, async (input) => safely(async () =>
-    runSessions(input, (browser) => browser.inspect().then((page) => withWebResult({ page }))),
+    runSessions(input, (browser, group) => browser.inspect(group.readiness).then((page) => withWebResult({ page }))),
   ));
 
   const runHttpActions = async <T>(actions: T[], operation: (action: T) => Promise<object>) => ({
@@ -280,42 +294,42 @@ function createServer(env: Env, publicOrigin: string) {
     description: 'Click different device-pixel coordinates in multiple selected tabs in parallel. Ground each entry’s coordinates in that tab’s screenshot or measured DOM bounds. Clicks can submit forms or trigger page actions.',
     inputSchema: clickSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.click(group.x, group.y, group.button))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.click(group.x, group.y, group.button, group.readiness))));
 
   server.registerTool('servo_type_text', {
     title: 'Servo type text',
     description: 'Type per-session text into each selected tab’s currently focused control in parallel. Focus the intended fields first. Typing can trigger live search, autosave, or other page effects.',
     inputSchema: typeTextSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.typeText(group.text))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.typeText(group.text, group.readiness))));
 
   server.registerTool('servo_press_key', {
     title: 'Servo press key',
     description: 'Press a key in multiple selected tabs in parallel. Each entry has its own key. Focus intended controls first; Enter may submit forms.',
     inputSchema: keySchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.pressKey(group.key))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.pressKey(group.key, group.readiness))));
 
   server.registerTool('servo_scroll', {
     title: 'Servo scroll',
     description: 'Scroll multiple selected tabs in parallel. Each entry has its own pixel deltas and optional viewport point.',
     inputSchema: scrollSchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.scroll(group.deltaX, group.deltaY, group.x, group.y))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.scroll(group.deltaX, group.deltaY, group.x, group.y, group.readiness))));
 
   server.registerTool('servo_history', {
     title: 'Servo history',
     description: 'Move multiple selected tabs backward or forward in their live Servo history. Each entry chooses its own direction. History is not part of the restore snapshot and resets after the runtime is discarded.',
     inputSchema: historySchema,
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.history(group.direction))));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.history(group.direction, group.readiness))));
 
   server.registerTool('servo_reload', {
     title: 'Servo reload',
     description: 'Reload multiple selected tabs in parallel and process pending browser events without waiting for network or timer idle.',
-    inputSchema: multiSession({}),
+    inputSchema: multiSession({ readiness: readinessSchema.optional() }),
     _meta: browserUiMeta
-  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.reload())));
+  }, async (input) => safely(async () => runSessions(input, (browser, group) => browser.reload(group.readiness))));
 
   server.registerTool('servo_wait', {
     title: 'Servo wait',
@@ -332,7 +346,7 @@ function createServer(env: Env, publicOrigin: string) {
   }, async (input) => safely(async () => {
     const images: Uint8Array[] = [];
     const { responses } = await runSessions(input, async (browser, group) => {
-      const result = await browser.screenshot(group.fullPage);
+      const result = await browser.screenshot(group.fullPage, group.readiness);
       const imageIndex = images.push(result.png) - 1;
       return { page: result.page, imageIndex };
     });
@@ -345,7 +359,7 @@ function createServer(env: Env, publicOrigin: string) {
     inputSchema: recordingStartSchema,
     _meta: browserUiMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) =>
-    browser.startScreenRecording(group.fps, group.maxDurationSeconds),
+    browser.startScreenRecording(group.fps, group.maxDurationSeconds, group.readiness),
   )));
 
   server.registerTool('servo_recording_stop', {
