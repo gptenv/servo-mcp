@@ -50,7 +50,7 @@ const pageSummaryExpression = `JSON.stringify({url: location.href, title: docume
     }
   };
   traverse(document);
-  return contents.join('\n').slice(0, 20000);
+  return contents.join('\\n').slice(0, 20000);
 })()})`;
 const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
   const nodePath=(node)=>{const path=[];for(let current=node;current&&current!==document.documentElement;current=current.parentElement){const parent=current.parentElement;if(!parent)return null;path.unshift(Array.prototype.indexOf.call(parent.children,current));}return path;};
