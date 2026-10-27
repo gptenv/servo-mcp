@@ -31,6 +31,15 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   // Snapshot the scripted options at creation time so later mutations cannot
   // retroactively change an already-running session's behaviour.
   const runtime = new FakeServoRuntime({ ...runtimeOptionsHolder.options });
+  if (typeof config.url === 'string') {
+    runtime.setInitialUrl(config.url);
+    // The real core adapter pumps and waits for the initial navigation before
+    // returning; the fake must model that boundary too, not return too early.
+    if (config.url !== 'about:blank') {
+      await runtime.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
+      await runtime.waitForPageReady(config.readiness);
+    }
+  }
   runtimeConfigs.push(config);
   createdRuntimes.push(runtime);
   return runtime;
@@ -293,7 +302,8 @@ describe('initialize', () => {
     scriptRuntime({ summary: { url: 'https://public.example/page', title: 'Public', text: 'text' } });
     const session = await newSession();
     await session.initialize(initOptions({ url: 'https://public.example/page' }));
-    expect(lastRuntimeCalls()).toContain('loadPage:https://public.example/page');
+    expect(runtimeConfigs[0].url).toBe('https://public.example/page');
+    expect(lastRuntimeCalls()).not.toContain('loadPage:https://public.example/page');
   });
 
   it('fails loudly when a requested navigation remains at about:blank', async () => {
@@ -349,10 +359,10 @@ describe('initialize', () => {
     await expect(session.initialize(initOptions())).rejects.toBe('boom');
   });
 
-  it('reports when Servo refuses the requested URL', async () => {
-    scriptRuntime({ loadPageReturns: false });
+  it('propagates runtime creation failures when initializing a requested URL', async () => {
+    createServoWorkerRuntime.mockRejectedValueOnce(new Error('runtime creation failed'));
     const session = await newSession();
-    await expect(session.initialize(initOptions({ url: 'https://public.example/' }))).rejects.toThrow(/rejected the requested URL/);
+    await expect(session.initialize(initOptions({ url: 'https://public.example/' }))).rejects.toThrow('runtime creation failed');
   });
 
   it('processes an initial load cooperatively without requiring idle settlement', async () => {
@@ -433,7 +443,7 @@ describe('initialize', () => {
     const splitSurrogateValue = `${'x'.repeat(32_767)}🙂tail`;
     localStorage.push(['unicode-value', splitSurrogateValue]);
     scriptRuntime({
-      summary: { url: 'about:blank', title: 't', text: '' },
+      summary: { url: 'https://public.example/page', title: 't', text: '' },
       evaluations: {
         [RESUME_MARKER]: okString({
           ...validResumeState,
@@ -794,6 +804,17 @@ describe('operate lifecycle', () => {
   it('reports when Servo rejects a navigate request', async () => {
     const session = await activeSession({ loadPageReturns: false });
     await expect(session.navigate('https://public.example/')).rejects.toThrow(/rejected the requested URL/);
+  });
+
+
+  it('does not return page contents or start recording when core readiness fails', async () => {
+    const session = await activeSession({
+      summary: { url: 'https://public.example/page', title: 'P', text: 'loading...' },
+      pageReadyResult: { ready: false, reason: 'timeout' },
+    });
+    await expect(session.inspect()).rejects.toThrow(/readiness timed out/i);
+    await expect(session.click(10, 10)).rejects.toThrow(/readiness timed out/i);
+    await expect(session.startScreenRecording(2, 4)).rejects.toThrow(/readiness timed out/i);
   });
 
   it('runs inspect, wait, click, typeText, pressKey, scroll, history, reload, screenshot, capabilities', async () => {
