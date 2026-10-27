@@ -33,7 +33,7 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v6
 
@@ -49,6 +49,15 @@ jobs:
       - uses: ./servo-wasm-source/.github/actions/setup-python
         with:
           python-version-file-path: servo-wasm-source/.python-version
+
+      - name: Install taplo for build formatting
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: taplo-cli
+          locked: true
+
+      - name: Change Mirror Priorities
+        uses: ./servo-wasm-source/.github/actions/apt-mirrors
 
       - name: Install Servo build dependencies
         working-directory: servo-wasm-source
