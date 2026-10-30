@@ -1113,6 +1113,34 @@ describe('session termination', () => {
   });
 });
 
+describe('widget screenshot bytes', () => {
+  it('publishes a PNG and serves it only for the current token', async () => {
+    const session = await newSession();
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    await expect(session.publishWidgetScreenshot(new Uint8Array())).rejects.toThrow(/empty/);
+    await expect(session.publishWidgetScreenshot('nope' as unknown as Uint8Array)).rejects.toThrow(/empty/);
+    await expect(session.publishWidgetScreenshot(new Uint8Array(8 * 1024 * 1024 + 1))).rejects.toThrow(/8388608/);
+    const first = await session.publishWidgetScreenshot(pngBytes);
+    expect(first.token).toMatch(/^[0-9a-f-]{36}$/i);
+    const url = `https://worker.example/screenshots/${UUID}/${first.token}`;
+    expect((await session.fetch(new Request(url, { method: 'POST' }))).status).toBe(405);
+    const ok = await session.fetch(new Request(url));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('content-type')).toBe('image/png');
+    expect(ok.headers.get('cache-control')).toBe('private, no-store');
+    expect(ok.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(pngBytes);
+    const replaced = await session.publishWidgetScreenshot(new Uint8Array([1, 2, 3]));
+    expect((await session.fetch(new Request(url))).status).toBe(404);
+    expect(new Uint8Array(await (await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/not-a-token`))).status).toBe(404);
+    expect((await session.fetch(new Request('https://worker.example/screenshots/short'))).status).toBe(404);
+    expect((await session.fetch(new Request('https://worker.example/other'))).status).toBe(404);
+    await session.close();
+    expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).status).toBe(404);
+  });
+});
+
 function lastRuntimeCalls(): string[] {
   const runtime = createdRuntimes.at(-1);
   if (!runtime) throw new Error('no runtime created');

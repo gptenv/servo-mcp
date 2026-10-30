@@ -8,8 +8,9 @@ import { ServoBrowserSession, type PageReadinessOptions } from './browser-sessio
 import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
 
-const WIDGET_URI = 'ui://servo/browser.html';
-const SEARCH_WIDGET_URI = 'ui://servo/search.html';
+const WIDGET_URI = 'ui://servo/browser-v2.html';
+const SEARCH_WIDGET_URI = 'ui://servo/search-v2.html';
+const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
 
@@ -72,12 +73,23 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+export type WidgetScreenshot = {
+  sessionID: string;
+  mimeType: 'image/png';
+  url: string;
+  byteLength: number;
+  imageIndex?: number;
+  data?: string;
+};
+
 export function mcpResult(value: object) {
   const data: Record<string, unknown> = { ...value };
   const png = data.png;
   const images = data.images;
+  const widgetScreenshots = Array.isArray(data.widgetScreenshots) ? data.widgetScreenshots : [];
   delete data.png;
   delete data.images;
+  delete data.widgetScreenshots;
   const responses = data.responses;
   if (Array.isArray(responses)) {
     const successfulCount = responses.filter((entry) => entry?.ok === true).length;
@@ -93,8 +105,58 @@ export function mcpResult(value: object) {
     }
   }
   return { structuredContent: data, content,
+    ...(widgetScreenshots.length ? { _meta: { ui: { screenshots: widgetScreenshots } } } : {}),
     ...(Array.isArray(responses) && responses.some((entry) => entry?.ok === false) ? { isError: true } : {}),
   };
+}
+
+function widgetResourceMeta(origin: string) {
+  return {
+    ui: {
+      prefersBorder: true,
+      csp: { connectDomains: [], resourceDomains: [origin] },
+    },
+    'openai/widgetPrefersBorder': true,
+    'openai/widgetCSP': { connect_domains: [], resource_domains: [origin] },
+  };
+}
+
+function takeWidgetScreenshots(responses: readonly object[]): WidgetScreenshot[] {
+  const shots: WidgetScreenshot[] = [];
+  for (const entry of responses) {
+    if (!('response' in entry) || !entry.response || typeof entry.response !== 'object') continue;
+    const response = entry.response as { widgetScreenshot?: WidgetScreenshot };
+    const shot = response.widgetScreenshot;
+    if (!shot) continue;
+    shots.push(shot);
+    delete response.widgetScreenshot;
+  }
+  return shots;
+}
+
+async function publishWidgetScreenshot(
+  browser: { publishWidgetScreenshot: (png: Uint8Array) => Promise<{ token: string }> },
+  origin: string,
+  sessionId: string,
+  png: Uint8Array,
+  imageIndex?: number,
+): Promise<WidgetScreenshot | undefined> {
+  try {
+    if (!(png instanceof Uint8Array) || png.byteLength === 0) return undefined;
+    const published = await browser.publishWidgetScreenshot(png);
+    if (typeof published?.token !== 'string' || !/^[0-9a-f-]{36}$/i.test(published.token)) return undefined;
+    const shot: WidgetScreenshot = {
+      sessionID: sessionId,
+      mimeType: 'image/png',
+      url: new URL(`/screenshots/${sessionId}/${published.token}`, origin).href,
+      byteLength: png.byteLength,
+    };
+    if (imageIndex !== undefined) shot.imageIndex = imageIndex;
+    if (png.byteLength <= WIDGET_INLINE_SCREENSHOT_BYTES) shot.data = toBase64(png);
+    return shot;
+  } catch {
+    return undefined;
+  }
 }
 
 function errorResult(error: unknown) {
@@ -121,14 +183,15 @@ function createServer(env: Env, publicOrigin: string) {
     try { return mcpResult(await operation()); } catch (error) { return errorResult(error); }
   };
 
+  const browserWidgetMeta = widgetResourceMeta(publicOrigin);
   server.registerResource('servo-browser-ui', WIDGET_URI, {
     title: 'Servo browser controls',
     description: 'Load a public page, inspect it, and view its rendered screenshot. The first navigation creates a tab automatically.',
     mimeType: 'text/html;profile=mcp-app',
-    _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
+    _meta: browserWidgetMeta,
   }, async (uri) => ({ contents: [{ uri: uri.href,
     mimeType: 'text/html;profile=mcp-app', text: widgetHtml,
-    _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
+    _meta: browserWidgetMeta,
   }] }));
 
   server.registerResource('servo-web-search-ui', SEARCH_WIDGET_URI, {
@@ -232,23 +295,33 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_navigate', {
     title: 'Servo navigate',
-    description: 'Load and wait for a ready public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. Each actions entry has its own load budget; private/local network addresses are blocked.',
+    description: 'Load and wait for a ready public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. The browser app receives a viewport screenshot of each loaded page. Each actions entry has its own load budget; private/local network addresses are blocked.',
     inputSchema: navigateSchema,
     _meta: browserUiMeta,
-  }, async (input) => safely(async () => runSessions(input, async (browser, group, created) => {
-    // Initialization already loads new tabs; do not execute navigation twice.
-    if (created) return withWebResult({ action: 'navigate', page: await browser.inspect() });
-    return withWebResult(group.html !== undefined
-      ? await (group.readiness ? browser.navigateHtml(group.html, group.readiness) : browser.navigateHtml(group.html))
-      : await (group.readiness ? browser.navigate(group.url!, group.readiness) : browser.navigate(group.url!)));
-  }, (group) => {
-    if ((group.url === undefined) === (group.html === undefined)) throw new TypeError('Provide a URL or inline HTML, not both.');
-    if (group.url) assertPublicHttpUrl(group.url);
-    if (group.html !== undefined && new TextEncoder().encode(group.html).byteLength > 1 * 1024 * 1024) {
-      throw new RangeError('Inline HTML exceeds 1048576 UTF-8 bytes, the resumable-session limit.');
-    }
-    return { url: group.url, html: group.html, ...(group.readiness ? { readiness: group.readiness } : {}) };
-  })));
+  }, async (input) => safely(async () => {
+    const { responses } = await runSessions(input, async (browser, group, created) => {
+      // Initialization already loads new tabs; do not execute navigation twice.
+      const navigated = created
+        ? withWebResult({ action: 'navigate', page: await browser.inspect() })
+        : withWebResult(group.html !== undefined
+          ? await (group.readiness ? browser.navigateHtml(group.html, group.readiness) : browser.navigateHtml(group.html))
+          : await (group.readiness ? browser.navigate(group.url!, group.readiness) : browser.navigate(group.url!)));
+      let widgetScreenshot: WidgetScreenshot | undefined;
+      try {
+        const captured = await (group.readiness ? browser.screenshot(false, group.readiness) : browser.screenshot(false));
+        widgetScreenshot = await publishWidgetScreenshot(browser, publicOrigin, group.sessionId, captured.png);
+      } catch { /* The page result is still useful when capture or storage fails. */ }
+      return widgetScreenshot ? { ...navigated, widgetScreenshot } : navigated;
+    }, (group) => {
+      if ((group.url === undefined) === (group.html === undefined)) throw new TypeError('Provide a URL or inline HTML, not both.');
+      if (group.url) assertPublicHttpUrl(group.url);
+      if (group.html !== undefined && new TextEncoder().encode(group.html).byteLength > 1 * 1024 * 1024) {
+        throw new RangeError('Inline HTML exceeds 1048576 UTF-8 bytes, the resumable-session limit.');
+      }
+      return { url: group.url, html: group.html, ...(group.readiness ? { readiness: group.readiness } : {}) };
+    });
+    return { responses, widgetScreenshots: takeWidgetScreenshots(responses) };
+  }));
 
   server.registerTool('servo_inspect', {
     title: 'Servo inspect',
@@ -346,12 +419,14 @@ function createServer(env: Env, publicOrigin: string) {
     _meta: browserUiMeta,
   }, async (input) => safely(async () => {
     const images: Uint8Array[] = [];
+    const widgetScreenshots: Array<WidgetScreenshot | undefined> = [];
     const { responses } = await runSessions(input, async (browser, group) => {
       const result = await (group.readiness ? browser.screenshot(group.fullPage, group.readiness) : browser.screenshot(group.fullPage));
       const imageIndex = images.push(result.png) - 1;
+      widgetScreenshots[imageIndex] = await publishWidgetScreenshot(browser, publicOrigin, group.sessionId, result.png, imageIndex);
       return { page: result.page, imageIndex };
     });
-    return { responses, images };
+    return { responses, images, widgetScreenshots: widgetScreenshots.filter((shot): shot is WidgetScreenshot => shot !== undefined) };
   }));
 
   server.registerTool('servo_recording_start', {
@@ -425,7 +500,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ ok: true, name: 'servo-mcp' });
-    if (url.pathname.startsWith('/recordings/')) {
+    if (url.pathname.startsWith('/recordings/') || url.pathname.startsWith('/screenshots/')) {
       const sessionId = url.pathname.split('/')[2];
       if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) return new Response('Not found', { status: 404 });
       return env.BROWSER_SESSIONS.getByName(sessionId).fetch(request);

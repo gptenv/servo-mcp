@@ -479,6 +479,14 @@ export class ServoBrowserSession extends DurableObject<Env> {
           PRIMARY KEY (recording_id, chunk_index)
         )
       `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS browser_widget_screenshot (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+          token TEXT NOT NULL,
+          png_blob BLOB NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `);
       const active = ctx.storage.sql.exec<{ id: string; fps: number }>(
         "SELECT id, fps FROM browser_recording WHERE status = 'recording' LIMIT 1",
       ).toArray()[0];
@@ -681,6 +689,12 @@ export class ServoBrowserSession extends DurableObject<Env> {
         oldest.id,
       );
     }
+  }
+
+  private clearStoredPage(): void {
+    this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
+    this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+    this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot');
   }
 
   private writeStatus(status: SessionStatus, expiresAt = Date.now()): void {
@@ -1069,8 +1083,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (recording) await this.failRecording(recording.id, 'The browser session expired while recording.');
       this.clearRuntime();
       this.writeStatus('expired');
-      this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-      this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+      this.clearStoredPage();
     }
     await this.scheduleNextAlarm();
   }
@@ -1086,8 +1099,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       if (recording) await this.failRecording(recording.id, 'The browser session expired while recording.');
       this.clearRuntime();
       this.writeStatus('expired');
-      this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-      this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+      this.clearStoredPage();
       await this.scheduleNextAlarm();
       throw new Error('Browser session was reaped after 30 days of inactivity. Omit sessionID or supply a falsy value on a browser action to create a new tab.');
     }
@@ -1189,8 +1201,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       } catch (error) {
         this.clearRuntime();
         this.writeStatus('failed');
-        this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-        this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+        this.clearStoredPage();
         throw error;
       }
     });
@@ -1205,8 +1216,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         if (recording) await this.failRecording(recording.id, 'The browser session expired while recording.');
         this.clearRuntime();
         this.writeStatus('expired');
-        this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-        this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+        this.clearStoredPage();
         await this.scheduleNextAlarm();
         return { status: 'expired', updatedAt: row.updated_at, expiresAt: row.expires_at, runtimeAvailable: false, resumable: false };
       }
@@ -1486,9 +1496,24 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
+  async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
+    if (!(png instanceof Uint8Array) || png.byteLength === 0) throw new TypeError('Screenshot bytes are empty.');
+    if (png.byteLength > MAX_RESPONSE_BYTES) throw new RangeError('Screenshot exceeds 8388608 bytes.');
+    return this.serial(async () => {
+      const token = crypto.randomUUID();
+      this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot');
+      this.ctx.storage.sql.exec(
+        'INSERT INTO browser_widget_screenshot (singleton, token, png_blob, updated_at) VALUES (1, ?, ?, ?)',
+        token, sqlBuffer(png), Date.now(),
+      );
+      return { token };
+    });
+  }
+
   async fetch(request: Request): Promise<Response> {
     if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
     const parts = new URL(request.url).pathname.split('/').filter(Boolean);
+    if (parts[0] === 'screenshots') return this.fetchWidgetScreenshot(parts);
     if (parts.length !== 4 || parts[0] !== 'recordings') return new Response('Not found', { status: 404 });
     const [, sessionId, recordingId, token] = parts;
     if (!/^[0-9a-f-]{36}$/i.test(sessionId) || !/^[0-9a-f-]{36}$/i.test(recordingId) || !/^[0-9a-f-]{36}$/i.test(token)) {
@@ -1526,6 +1551,30 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
+  private fetchWidgetScreenshot(parts: string[]): Promise<Response> | Response {
+    if (parts.length !== 3) return new Response('Not found', { status: 404 });
+    const token = parts[2];
+    if (!/^[0-9a-f-]{36}$/i.test(parts[1] ?? '') || !/^[0-9a-f-]{36}$/i.test(token ?? '')) {
+      return new Response('Not found', { status: 404 });
+    }
+    return this.serial(async () => {
+      const row = this.ctx.storage.sql.exec<{ token: string; png_blob: ArrayBuffer }>(
+        'SELECT token, png_blob FROM browser_widget_screenshot WHERE singleton = 1',
+      ).toArray()[0];
+      if (!row || row.token !== token) return new Response('Not found', { status: 404 });
+      const bytes = sqlBytes(row.png_blob);
+      const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      return new Response(body, {
+        headers: {
+          'Content-Type': 'image/png',
+          'Content-Length': String(bytes.byteLength),
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    });
+  }
+
   async capabilities(): Promise<unknown> {
     return this.operate(async (runtime) => runtime.capabilities());
   }
@@ -1553,8 +1602,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       this.clearRuntime();
       const row = this.row();
       if (row && row.status !== 'closed') this.writeStatus('closed');
-      this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
-      this.ctx.storage.sql.exec('DELETE FROM browser_asset');
+      this.clearStoredPage();
       await this.scheduleNextAlarm();
       return { status: 'closed' };
     });

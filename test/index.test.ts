@@ -61,6 +61,8 @@ function makeSession(): Session {
     reload: vi.fn(async () => ({ action: 'reload' })),
     wait: vi.fn(async () => ({ action: 'wait' })),
     screenshot: vi.fn(async () => ({ page: { title: 'Example' }, png })),
+    publishWidgetScreenshot: vi.fn(async () => ({ token: '00000000-0000-4000-8000-0000000000aa' })),
+    fetch: vi.fn(async () => new Response(null, { status: 404 })),
     startScreenRecording: vi.fn(async (fps: number, maxDurationSeconds: number) => ({ recordingId: '00000000-0000-4000-8000-000000000003', status: 'recording', fps, maxDurationSeconds })),
     stopScreenRecording: vi.fn(async (recordingId: string) => ({ recordingId, status: 'encoding' })),
     getScreenRecordingStatus: vi.fn(async (recordingId: string) => ({ recordingId, status: 'ready' })),
@@ -109,6 +111,11 @@ describe('MCP result encoding', () => {
     const largePng = new Uint8Array(0x8001).fill(3);
     const result = mcpResult({ png, images: [largePng, 'invalid', null], detail: 'kept' });
     expect(result.structuredContent).toEqual({ detail: 'kept' });
+    const widget = mcpResult({ detail: 'kept', widgetScreenshots: [{ sessionID: 's', url: 'https://worker.example/screenshots/s/t', data: 'abc' }] });
+    expect(widget.structuredContent).toEqual({ detail: 'kept' });
+    expect(widget._meta).toEqual({ ui: { screenshots: [{ sessionID: 's', url: 'https://worker.example/screenshots/s/t', data: 'abc' }] } });
+    expect(widget.content[0]).toMatchObject({ type: 'text' });
+    if (widget.content[0].type === 'text') expect(widget.content[0].text).not.toContain('abc');
     expect(result.content).toHaveLength(3);
     expect(result.content[1]).toMatchObject({ type: 'image', data: Buffer.from(png).toString('base64') });
     expect(result.content[2]).toMatchObject({ type: 'image', data: Buffer.from(largePng).toString('base64') });
@@ -145,25 +152,44 @@ describe('MCP Worker routes and server registration', () => {
 
     const searchResource = harness.resources.get('servo-web-search-ui')!;
     expect(searchResource.definition.mimeType).toBe('text/html;profile=mcp-app');
-    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search.html');
+    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v2.html');
     for (const [name, tool] of harness.tools) {
-      if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser.html');
+      if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser-v2.html');
     }
     expect(registeredTool('servo_app_open').definition._meta?.['openai/ui']?.entrypoints?.[0]?.type).toBe('global');
     expect(registeredTool('servo_app_open').definition.inputSchema.parse({})).toEqual({});
     expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']).toBeUndefined();
     expect(registeredTool('servo_inspect').definition._meta?.['openai/ui']).toBeUndefined();
-    const searchWidget = await searchResource.handler(new URL('ui://servo/search.html'));
+    const searchWidget = await searchResource.handler(new URL('ui://servo/search-v2.html'));
     expect(searchWidget.contents[0].text).toContain('Servo web search');
     expect(searchWidget.contents[0].text).toContain('<option value="brave">Brave</option>');
+    expect(searchWidget.contents[0].text).toContain('ui/initialize');
+    expect(searchWidget.contents[0].text).toContain('ui/notifications/initialized');
 
     const browserResource = harness.resources.get('servo-browser-ui')!;
-    const widget = await browserResource.handler(new URL('ui://servo/browser.html'));
+    const widget = await browserResource.handler(new URL('ui://servo/browser-v2.html'));
     expect(browserResource.definition.mimeType).toBe('text/html;profile=mcp-app');
     expect(widget.contents[0]).toMatchObject({
-      uri: 'ui://servo/browser.html', mimeType: 'text/html;profile=mcp-app',
+      uri: 'ui://servo/browser-v2.html', mimeType: 'text/html;profile=mcp-app',
+      _meta: {
+        ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: ['https://worker.example'] } },
+        'openai/widgetPrefersBorder': true,
+        'openai/widgetCSP': { connect_domains: [], resource_domains: ['https://worker.example'] },
+      },
     });
-    expect(widget.contents[0].text).toContain('Servo browser');
+    expect(browserResource.definition._meta).toEqual(widget.contents[0]._meta);
+    expect(widget.contents[0].text).toContain('ui/initialize');
+    expect(widget.contents[0].text).toContain('ui/notifications/initialized');
+    expect(widget.contents[0].text).toContain('protocolVersion');
+    expect(widget.contents[0].text).toContain('servo_evaluate');
+    expect(widget.contents[0].text).toContain('#preview:not([src])');
+    expect(widget.contents[0].text).not.toMatch(/<img id="preview"[^>]*\ssrc=/);
+
+    const token = '00000000-0000-4000-8000-0000000000aa';
+    const shot = await worker.fetch(new Request(`https://worker.example/screenshots/${sessionId}/${token}`), env, {} as ExecutionContext);
+    expect(shot.status).toBe(404);
+    expect(env.BROWSER_SESSIONS.getByName).toHaveBeenCalledWith(sessionId);
+    expect((await worker.fetch(new Request('https://worker.example/screenshots/not-a-uuid/token'), env, {} as ExecutionContext)).status).toBe(404);
   });
 });
 
@@ -265,6 +291,32 @@ describe('focused browser tools', () => {
       title: 'Example', url: 'https://example.com/', snippet: 'visible page text', content: 'visible page text',
     });
     expect(defaultSession.navigate).toHaveBeenCalledWith('https://example.com/');
+    const browsedShot = (await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/' }])));
+    expect(browsedShot._meta.ui.screenshots[0]).toMatchObject({
+      sessionID: sessionId,
+      mimeType: 'image/png',
+      byteLength: png.byteLength,
+      data: Buffer.from(png).toString('base64'),
+      url: `https://worker.example/screenshots/${sessionId}/00000000-0000-4000-8000-0000000000aa`,
+    });
+    expect(browsedShot.structuredContent.responses[0].response.widgetScreenshot).toBeUndefined();
+    expect(browsedShot.content[0].text).not.toContain(Buffer.from(png).toString('base64'));
+    defaultSession.screenshot.mockRejectedValueOnce(new Error('capture failed'));
+    const captureFailed = await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/again' }]));
+    expect(captureFailed.structuredContent.responses[0]).toMatchObject({ ok: true, sessionID: sessionId });
+    expect(captureFailed._meta).toBeUndefined();
+    defaultSession.publishWidgetScreenshot.mockRejectedValueOnce(new Error('store failed'));
+    expect((await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/store' }])))._meta).toBeUndefined();
+    defaultSession.publishWidgetScreenshot.mockResolvedValueOnce({ token: 'not-a-uuid' });
+    expect((await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/token' }])))._meta).toBeUndefined();
+    defaultSession.screenshot.mockResolvedValueOnce({ page: { title: 'Empty' }, png: new Uint8Array() });
+    expect((await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/empty' }])))._meta).toBeUndefined();
+    const big = new Uint8Array(96 * 1024 + 1);
+    defaultSession.screenshot.mockResolvedValueOnce({ page: { title: 'Big' }, png: big });
+    const largeShot = (await invoke('servo_navigate', browserInput([{ sessionId, url: 'https://example.com/big' }])))._meta.ui.screenshots[0];
+    expect(largeShot.data).toBeUndefined();
+    expect(largeShot.byteLength).toBe(big.byteLength);
+    expect(largeShot.url).toContain(`/screenshots/${sessionId}/`);
     expect(defaultSession.click).toHaveBeenCalledWith(3, 4, 0);
     expect(defaultSession.scroll).toHaveBeenCalledWith(1, 2, undefined, undefined);
     expect(defaultSession.wait).toHaveBeenCalledWith();
@@ -484,6 +536,11 @@ describe('focused browser tools', () => {
     expect(result.content[0].text).toContain('imageIndex');
     expect(result.content[1]).toMatchObject({ type: 'image', data: Buffer.from(largePng).toString('base64'), mimeType: 'image/png' });
     expect(result.content[2]).toMatchObject({ type: 'image', data: Buffer.from(png).toString('base64'), mimeType: 'image/png' });
+    expect(result._meta.ui.screenshots).toEqual([
+      expect.objectContaining({ sessionID: sessionId, imageIndex: 0, mimeType: 'image/png', byteLength: largePng.byteLength, data: Buffer.from(largePng).toString('base64'), url: `https://worker.example/screenshots/${sessionId}/00000000-0000-4000-8000-0000000000aa` }),
+      expect.objectContaining({ sessionID: thirdId, imageIndex: 1, mimeType: 'image/png', byteLength: png.byteLength, data: Buffer.from(png).toString('base64'), url: `https://worker.example/screenshots/${thirdId}/00000000-0000-4000-8000-0000000000aa` }),
+    ]);
+    expect(result.structuredContent.responses[0].response.widgetScreenshot).toBeUndefined();
     const duplicate = await invoke('servo_screenshot', browserInput([{ sessionId }, { sessionId }]));
     expect(duplicate.isError).toBe(true);
     expect(duplicate.content[0].text).toMatch(/only once/);
