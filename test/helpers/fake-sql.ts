@@ -148,6 +148,19 @@ export class FakeSqlDatabase {
         .filter((name) => name.startsWith(prefix)))];
       return this.finish(names.map((name) => ({ name })));
     }
+    if (/^DELETE FROM browser_widget_screenshot$/i.test(statement)) {
+      this.tables.get('browser_widget_screenshot')?.rows.splice(0);
+      return this.finish([]);
+    }
+    if (/^INSERT INTO browser_widget_screenshot \(singleton, token, png_blob, updated_at\) VALUES \(1, \?, \?, \?\)$/i.test(statement)) {
+      const [token, pngBlob, updatedAt] = params as [string, ArrayBuffer, number];
+      this.createTable('browser_widget_screenshot', ['singleton', 'token', 'png_blob', 'updated_at']);
+      this.tables.get('browser_widget_screenshot')!.rows = [{ singleton: 1, token, png_blob: pngBlob, updated_at: updatedAt }];
+      return this.finish([]);
+    }
+    if (/^SELECT token, png_blob FROM browser_widget_screenshot WHERE singleton = 1$/i.test(statement)) {
+      return this.finish(this.tables.get('browser_widget_screenshot')?.rows ?? []);
+    }
     if (/^SELECT COUNT\(DISTINCT name\) AS count FROM browser_asset WHERE name LIKE 'font:%'$/i.test(statement)) {
       const names = new Set((this.tables.get('browser_asset')?.rows ?? [])
         .map((row) => String(row.name))

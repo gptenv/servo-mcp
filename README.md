@@ -166,7 +166,13 @@ The local health endpoint is `http://127.0.0.1:8788/health`; the MCP endpoint is
 `http://127.0.0.1:8788/mcp`. Connect ChatGPT Developer Mode or MCP Inspector to
 the HTTPS `/mcp` URL exposed by your development tunnel. The app uses current
 Cloudflare `createMcpHandler` with stateless Streamable HTTP and the MCP Apps UI
-resource convention. Browser-session continuity lives in per-session Durable
+resource convention. The browser widget completes the `ui/initialize` handshake
+before it accepts tool input or calls tools. Viewport screenshots are stored on
+the session and returned to the widget in tool-result `_meta` (a Worker URL
+plus inline PNG bytes when the capture is at most 96 KiB). The browser UI
+resource allows that Worker origin in `ui.csp.resourceDomains` and
+`openai/widgetCSP.resource_domains`, and the widget falls back from a `data:`
+URL to the hosted PNG when a host CSP blocks one of them. Browser-session continuity lives in per-session Durable
 Objects, separate from the stateless MCP transport. The `ServoBrowserSession`
 SQLite class is declared in `wrangler.jsonc`; apply its migration when
 deploying.
