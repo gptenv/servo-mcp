@@ -162,14 +162,22 @@ describe('MCP Apps browser widget host', () => {
       executablePath,
       headless: true,
       timeout: 45_000,
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+      ],
     }) as { newPage: () => Promise<HostPage>; close: () => Promise<void> };
   }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  });
+  }, 30_000);
 
   async function openWidget(csp: string, kind = 'browser') {
     if (!browser) throw new Error('Chrome is not available.');
