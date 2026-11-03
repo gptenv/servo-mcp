@@ -36,6 +36,7 @@
   let sessionId = null;
   let accepting = false;
   let bridgeReady = false;
+  let bridgeInitialized = false;
   let suppressAutoShot = 0;
   let refreshing = false;
   let lastWidth = 0;
@@ -57,12 +58,20 @@
     if (!window.parent || window.parent === window) return;
     window.parent.postMessage(message, '*');
   }
-  function call(method, params) {
+  function withDeadline(promise, timeoutMs) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error('Host request timed out.'), { code: 'HOST_TIMEOUT' })), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+  function call(method, params, timeoutMs) {
     const id = nextId++;
-    return new Promise((resolve, reject) => {
+    const response = new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       post({ jsonrpc: '2.0', id, method, params });
     });
+    return withDeadline(response, timeoutMs).finally(() => pending.delete(id));
   }
   function reportSize() {
     if (!bridgeReady) return;
@@ -106,10 +115,12 @@
     pushAll(result?._meta?.mcp_tool_result?._meta?.ui?.screenshots);
     pushAll(result?._meta?.call_tool_result?._meta?.ui?.screenshots);
     const parts = Array.isArray(result?.content) ? result.content : [];
-    parts.forEach((part, index) => {
-      if (part?.type === 'image' && typeof part.data === 'string' && part.data && /^image\/(png|jpeg|webp|gif)$/.test(part.mimeType || '')) {
-        found.push({ mimeType: part.mimeType, data: part.data, imageIndex: index });
-      }
+    const responses = Array.isArray(result?.structuredContent?.responses) ? result.structuredContent.responses : [];
+    parts.filter((part) => part?.type === 'image').forEach((part, imageIndex) => {
+      if (typeof part.data !== 'string' || !part.data || !/^image\/(png|jpeg|webp|gif)$/.test(part.mimeType || '')) return;
+      const entry = responses.find((entry) => entry?.response?.imageIndex === imageIndex);
+      if (!entry && responses.length > 1) return;
+      found.push({ mimeType: part.mimeType, data: part.data, imageIndex, sessionID: (entry ?? responses[0])?.sessionID });
     });
     return found;
   }
@@ -134,8 +145,8 @@
     return true;
   }
   function preferredShot(shots) {
-    if (!shots.length) return undefined;
-    return shots.find((shot) => shot.sessionID === sessionId) || shots[0];
+    if (!sessionId) return shots[0];
+    return shots.find((shot) => shot.sessionID === sessionId) || shots.find((shot) => !shot.sessionID);
   }
   function pageOf(entry) {
     const page = entry?.response?.page;
@@ -178,15 +189,15 @@
   function applyResult(result, autoShot = true) {
     if (!result) return false;
     const entry = firstResponse(result);
-    if (entry?.sessionID) {
-      sessionId = entry.sessionID;
-      sessionField.textContent = sessionId;
-    }
-    if (entry?.ok === false) {
-      statusField.textContent = entry.error || 'Servo action failed.';
+    if (entry?.ok === false || (!entry && result.isError)) {
+      statusField.textContent = resultError(result, 'Servo action failed.');
       details.textContent = describe(result);
       reportSize();
       return false;
+    }
+    if (entry?.sessionID) {
+      sessionId = entry.sessionID;
+      sessionField.textContent = sessionId;
     }
     const page = entry ? pageOf(entry) : result.structuredContent;
     const pageUrl = httpUrl(page?.url);
@@ -198,7 +209,7 @@
     else if (shown && !statusField.textContent) statusField.textContent = 'Rendered';
     details.textContent = describe(result);
     reportSize();
-    return entry ? entry.ok !== false : true;
+    return true;
   }
   function applyOpenAi() {
     const openai = window.openai;
@@ -252,21 +263,16 @@
     reportSize();
   }
   async function connect() {
-    let timer;
     try {
-      const result = await Promise.race([
-        call('ui/initialize', {
-          appInfo: { name: 'Servo browser', version: '0.5.0' },
-          appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
-          protocolVersion: '2026-01-26',
-        }),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Host initialize timed out.')), 8000); }),
-      ]);
-      clearTimeout(timer);
+      const result = await call('ui/initialize', {
+        appInfo: { name: 'Servo browser', version: '0.5.0' },
+        appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
+        protocolVersion: '2026-01-26',
+      }, 8_000);
+      bridgeInitialized = true;
       post({ jsonrpc: '2.0', method: 'ui/notifications/initialized' });
       finishConnect(result);
     } catch {
-      clearTimeout(timer);
       finishConnect(null);
     }
   }
@@ -274,12 +280,15 @@
     await ready;
     suppressAutoShot += 1;
     try {
+      if (!bridgeInitialized && typeof window.openai?.callTool === 'function') {
+        return await withDeadline(window.openai.callTool(name, args), 90_000);
+      }
       try {
-        return await call('tools/call', { name, arguments: args });
+        return await call('tools/call', { name, arguments: args }, 90_000);
       } catch (error) {
         const fallback = window.openai && window.openai.callTool;
         if (typeof fallback !== 'function' || (error?.code !== -32601 && !/method not found/i.test(String(error?.message || '')))) throw error;
-        return await fallback(name, args);
+        return await withDeadline(window.openai.callTool(name, args), 90_000);
       }
     } finally {
       suppressAutoShot -= 1;
@@ -305,21 +314,21 @@
       const navigated = await callTool('servo_navigate', {
         actions: [{ ...(sessionId ? { sessionID: sessionId } : {}), url: urlField.value }],
       });
-      if (!applyResult(navigated, false) || firstResponse(navigated)?.ok === false) throw new Error(resultError(navigated, 'Servo could not load the page.'));
+      if (!applyResult(navigated, false)) throw new Error(resultError(navigated, 'Servo could not load the page.'));
       const script = scriptField.value.trim();
-      let needsShot = !screenshotList(navigated).length;
+      let needsShot = !preferredShot(screenshotList(navigated));
       if (script) {
         if (!sessionId) throw new Error('Navigation did not return a session.');
         statusField.textContent = 'Running page script…';
         const evaluated = await callTool('servo_evaluate', { actions: [{ sessionID: sessionId, script }] });
-        if (!applyResult(evaluated, false) || firstResponse(evaluated)?.ok === false) throw new Error(resultError(evaluated, 'Servo evaluation failed.'));
+        if (!applyResult(evaluated, false)) throw new Error(resultError(evaluated, 'Servo evaluation failed.'));
         needsShot = true;
       }
       if (needsShot) {
         if (!sessionId) throw new Error('Navigation did not return a session.');
         statusField.textContent = 'Capturing screenshot…';
         const rendered = await callTool('servo_screenshot', { actions: [{ sessionID: sessionId }] });
-        if (!applyResult(rendered, false) || firstResponse(rendered)?.ok === false || !screenshotList(rendered).length) {
+        if (!applyResult(rendered, false) || !preferredShot(screenshotList(rendered))) {
           throw new Error(resultError(rendered, 'Servo could not render the page.'));
         }
       }

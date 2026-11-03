@@ -13,6 +13,7 @@ export interface FakeDurableObjectState {
   id: { toString(): string };
   storage: {
     sql: FakeSqlDatabase;
+    transactionSync<T>(callback: () => T): T;
     getAlarm(): Promise<number | null>;
     setAlarm(at: number | Date): Promise<void>;
     deleteAlarm(): Promise<void>;
@@ -39,6 +40,7 @@ export function createFakeDurableObjectState(idString = 'session-do-id'): FakeDu
     id: { toString: () => idString },
     storage: {
       sql,
+      transactionSync: <T>(callback: () => T) => sql.transactionSync(callback),
       getAlarm: async () => alarms.current,
       setAlarm: async (at: number | Date) => {
         alarms.set.push(at);

@@ -5,6 +5,8 @@
  * DO storage without requiring a workerd runtime or the Servo WASM artifact.
  */
 
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+
 export interface FakeSqlTable {
   columns: string[];
   rows: Record<string, unknown>[];
@@ -12,6 +14,20 @@ export interface FakeSqlTable {
 
 export class FakeSqlDatabase {
   private readonly tables = new Map<string, FakeSqlTable>();
+  private readonly screenshots = new DatabaseSync(':memory:');
+
+  transactionSync<T>(callback: () => T): T {
+    this.screenshots.exec('BEGIN');
+    try {
+      const result = callback();
+      this.screenshots.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.screenshots.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
 
   createTable(name: string, columns: string[]): void {
     if (!this.tables.has(name)) this.tables.set(name, { columns, rows: [] });
@@ -23,6 +39,11 @@ export class FakeSqlDatabase {
 
   exec<T = Record<string, unknown>>(sql: string, ...params: unknown[]): { toArray(): T[] } {
     const statement = sql.replace(/\s+/g, ' ').trim();
+
+    if (/\bbrowser_widget_screenshot(?:_chunk)?\b/.test(statement)) {
+      const bindings = params.map((v) => v instanceof ArrayBuffer ? new Uint8Array(v) : v as SQLInputValue);
+      return this.finish(this.screenshots.prepare(statement).all(...bindings));
+    }
 
     if (/^CREATE TABLE IF NOT EXISTS/i.test(statement)) return this.finish([]);
 
@@ -148,19 +169,7 @@ export class FakeSqlDatabase {
         .filter((name) => name.startsWith(prefix)))];
       return this.finish(names.map((name) => ({ name })));
     }
-    if (/^DELETE FROM browser_widget_screenshot$/i.test(statement)) {
-      this.tables.get('browser_widget_screenshot')?.rows.splice(0);
-      return this.finish([]);
-    }
-    if (/^INSERT INTO browser_widget_screenshot \(singleton, token, png_blob, updated_at\) VALUES \(1, \?, \?, \?\)$/i.test(statement)) {
-      const [token, pngBlob, updatedAt] = params as [string, ArrayBuffer, number];
-      this.createTable('browser_widget_screenshot', ['singleton', 'token', 'png_blob', 'updated_at']);
-      this.tables.get('browser_widget_screenshot')!.rows = [{ singleton: 1, token, png_blob: pngBlob, updated_at: updatedAt }];
-      return this.finish([]);
-    }
-    if (/^SELECT token, png_blob FROM browser_widget_screenshot WHERE singleton = 1$/i.test(statement)) {
-      return this.finish(this.tables.get('browser_widget_screenshot')?.rows ?? []);
-    }
+
     if (/^SELECT COUNT\(DISTINCT name\) AS count FROM browser_asset WHERE name LIKE 'font:%'$/i.test(statement)) {
       const names = new Set((this.tables.get('browser_asset')?.rows ?? [])
         .map((row) => String(row.name))

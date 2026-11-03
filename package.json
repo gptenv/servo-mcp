@@ -27,6 +27,6 @@
     "puppeteer-core": "^24.22.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0",
-    "wrangler": "^4.139.0"
+    "wrangler": "^4.150.0"
   }
 }

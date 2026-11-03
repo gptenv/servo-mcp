@@ -724,51 +724,29 @@ describe('operate lifecycle', () => {
     return session;
   }
 
-  it('navigates public pages and annotates host fetch failures', async () => {
-    let firstPumpResolve!: () => void;
-    const pumpGate = new Promise<void>((resolve) => { firstPumpResolve = resolve; });
+  it.each([
+    { rejection: new TypeError('fetch failed'), message: 'fetch failed' },
+    { rejection: 'plain rejection', message: 'plain rejection' },
+  ])('annotates the navigated page when its host fetch rejects with $message', async ({ rejection, message }) => {
+    const url = 'https://public.example/page';
     const session = await activeSession({
-      summary: { url: 'https://public.example/page' },
-      pumpFactory: () => (pumpCalls++ === 0
-        ? pumpGate.then(() => ({ settled: true }))
-        : Promise.resolve({ settled: true })),
+      summary: () => ({ url: pumpCalls === 0 ? 'https://public.example/before' : url }),
+      pumpFactory: async () => {
+        if (pumpCalls++ === 0) {
+          const fetchPage = runtimeConfigs.at(-1)!.fetchImpl as typeof fetch;
+          await expect(fetchPage(url)).rejects.toBe(rejection);
+        }
+        return { settled: true };
+      },
     });
-    // While the navigate operation is mid-pump, the page's subresource fetch
-    // fails at the host level; the failure must surface as loadError.
-    const navigatePromise = session.navigate('https://public.example/page');
-    await Promise.resolve();
-    const config = runtimeConfigs[runtimeConfigs.length - 1];
-    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/page')
-      .then(() => undefined, () => undefined);
-    firstPumpResolve();
-    const result = await navigatePromise;
-    expect(result.action).toBe('navigate');
-    expect(result.page.loadError).toContain('The page could not be loaded: fetch failed');
-  });
-
-  it('records non-Error host fetch failures as strings', async () => {
-    let firstPumpResolve!: () => void;
-    const pumpGate = new Promise<void>((resolve) => { firstPumpResolve = resolve; });
-    const session = await activeSession({
-      summary: () => pumpCalls === 0
-        ? { url: 'https://public.example/x' }
-        : { url: 'https://public.example/page' },
-      pumpFactory: () => (pumpCalls++ === 0
-        ? pumpGate.then(() => ({ settled: true }))
-        : Promise.resolve({ settled: true })),
-    });
-    // While the navigate operation is mid-pump, a subresource fetch rejects
-    // with a non-Error value; the string form must surface as loadError.
-    const navigatePromise = session.navigate('https://public.example/page');
-    await Promise.resolve();
-    const config = runtimeConfigs[runtimeConfigs.length - 1];
-    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject('plain rejection')));
-    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/page')
-      .catch(() => undefined);
-    vi.unstubAllGlobals();
-    firstPumpResolve();
-    const result = await navigatePromise;
-    expect(result.page.loadError).toBe('The page could not be loaded: plain rejection');
+    const hostFetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
+    try {
+      const result = await session.navigate(url);
+      expect(result.action).toBe('navigate');
+      expect(result.page.loadError).toBe(`The page could not be loaded: ${message}`);
+    } finally {
+      hostFetch.mockRestore();
+    }
   });
 
   it('keeps plain summaries when no fetch failed for the page URL', async () => {
@@ -1114,8 +1092,9 @@ describe('session termination', () => {
 });
 
 describe('widget screenshot bytes', () => {
-  it('publishes a PNG and serves it only for the current token', async () => {
+  it('preserves published PNGs across captures and revokes them on close', async () => {
     const session = await newSession();
+    await session.initialize(initOptions());
     const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     await expect(session.publishWidgetScreenshot(new Uint8Array())).rejects.toThrow(/empty/);
     await expect(session.publishWidgetScreenshot('nope' as unknown as Uint8Array)).rejects.toThrow(/empty/);
@@ -1131,7 +1110,7 @@ describe('widget screenshot bytes', () => {
     expect(ok.headers.get('x-content-type-options')).toBe('nosniff');
     expect(new Uint8Array(await ok.arrayBuffer())).toEqual(pngBytes);
     const replaced = await session.publishWidgetScreenshot(new Uint8Array([1, 2, 3]));
-    expect((await session.fetch(new Request(url))).status).toBe(404);
+    expect((await session.fetch(new Request(url))).status).toBe(200);
     expect(new Uint8Array(await (await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/not-a-token`))).status).toBe(404);
     expect((await session.fetch(new Request('https://worker.example/screenshots/short'))).status).toBe(404);
@@ -1139,6 +1118,56 @@ describe('widget screenshot bytes', () => {
     await session.close();
     expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).status).toBe(404);
   });
+  it('round-trips a multi-megabyte capture, evicts the ninth-oldest token, and expires the rest', async () => {
+    const session = await newSession();
+    await session.initialize(initOptions());
+    const png = Uint8Array.from({ length: 2 * 1024 * 1024 + 31 }, (_, i) => (i * 17) % 251);
+    const request = (token: string) => new Request(`https://worker.example/screenshots/${UUID}/${token}`);
+    const first = await session.publishWidgetScreenshot(png);
+    const fetched = await session.fetch(request(first.token));
+    expect(fetched.status).toBe(200);
+    expect(Buffer.from(await fetched.arrayBuffer()).equals(Buffer.from(png))).toBe(true);
+    const sizes = sql().exec<{ size: number }>(
+      'SELECT length(png_blob) AS size FROM browser_widget_screenshot_chunk WHERE token = ? ORDER BY chunk_index', first.token,
+    ).toArray().map(row => row.size);
+    expect(sizes).toEqual([524288, 524288, 524288, 524288, 31]);
+    const small = new Uint8Array([1]);
+    const second = await session.publishWidgetScreenshot(small);
+    for (let i = 0; i < 7; i++) await session.publishWidgetScreenshot(small);
+    expect((await session.fetch(request(first.token))).status).toBe(404);
+    expect((await session.fetch(request(second.token))).status).toBe(200);
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
+    expect((await session.fetch(request(second.token))).status).toBe(404);
+    await session.alarm();
+    expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([]);
+  });
+
+  it('rolls back a partially stored PNG without invalidating an earlier link', async () => {
+    const session = await newSession();
+    await session.initialize(initOptions());
+    const existing = await session.publishWidgetScreenshot(new Uint8Array([42]));
+    sql().exec(`CREATE TRIGGER reject_second_chunk BEFORE INSERT ON browser_widget_screenshot_chunk
+      WHEN NEW.chunk_index = 1 BEGIN SELECT RAISE(ABORT, 'chunk write failed'); END`);
+    await expect(session.publishWidgetScreenshot(new Uint8Array(600_000))).rejects.toThrow('chunk write failed');
+    expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([{ token: existing.token }]);
+    const response = await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${existing.token}`));
+    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([42]);
+  });
+
+  it('migrates a published singleton without changing its URL or extending its lifetime', async () => {
+    await newSession();
+    const token = crypto.randomUUID();
+    const updated = Date.now() - 60_000;
+    sql().exec('INSERT INTO browser_widget_screenshot (singleton, token, png_blob, updated_at) VALUES (1, ?, ?, ?)',
+      token, new Uint8Array([4, 2]).buffer, updated);
+    const restored = new mod.ServoBrowserSession(asDoState(state), {} as Env);
+    const request = new Request(`https://worker.example/screenshots/${UUID}/${token}`);
+    expect([...new Uint8Array(await (await restored.fetch(request)).arrayBuffer())]).toEqual([4, 2]);
+    expect(sql().exec('SELECT token FROM browser_widget_screenshot').toArray()).toEqual([]);
+    vi.setSystemTime(updated + 24 * 60 * 60 * 1000);
+    expect((await restored.fetch(request)).status).toBe(404);
+  });
+
 });
 
 function lastRuntimeCalls(): string[] {

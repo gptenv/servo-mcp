@@ -32,6 +32,7 @@
   let nextId = 1;
   let accepting = false;
   let bridgeReady = false;
+  let bridgeInitialized = false;
   let readyResolve = () => {};
   const ready = new Promise((resolve) => { readyResolve = resolve; });
   const queryField = document.querySelector('#query');
@@ -43,12 +44,20 @@
     if (!window.parent || window.parent === window) return;
     window.parent.postMessage(message, '*');
   }
-  function call(method, params) {
+  function withDeadline(promise, timeoutMs) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error('Host request timed out.'), { code: 'HOST_TIMEOUT' })), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+  function call(method, params, timeoutMs) {
     const id = nextId++;
-    return new Promise((resolve, reject) => {
+    const response = new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       post({ jsonrpc: '2.0', id, method, params });
     });
+    return withDeadline(response, timeoutMs).finally(() => pending.delete(id));
   }
   function reportSize() {
     if (!bridgeReady) return;
@@ -117,21 +126,16 @@
     reportSize();
   }
   async function connect() {
-    let timer;
     try {
-      await Promise.race([
-        call('ui/initialize', {
-          appInfo: { name: 'Servo web search', version: '0.5.0' },
-          appCapabilities: { availableDisplayModes: ['inline'] },
-          protocolVersion: '2026-01-26',
-        }),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Host initialize timed out.')), 8000); }),
-      ]);
-      clearTimeout(timer);
+      await call('ui/initialize', {
+        appInfo: { name: 'Servo web search', version: '0.5.0' },
+        appCapabilities: { availableDisplayModes: ['inline'] },
+        protocolVersion: '2026-01-26',
+      }, 8_000);
+      bridgeInitialized = true;
       post({ jsonrpc: '2.0', method: 'ui/notifications/initialized' });
       finishConnect();
     } catch {
-      clearTimeout(timer);
       finishConnect();
     }
   }
@@ -139,16 +143,31 @@
   async function runSearch(event) {
     event.preventDefault();
     if (searching) return;
+    const query = queryField.value.trim();
+    if (!query) {
+      document.querySelector('#status').textContent = 'Enter a search query.';
+      queryField.focus();
+      return;
+    }
     searching = true;
     const status = document.querySelector('#status');
     searchButton.disabled = true;
     status.textContent = 'Searching…';
     try {
       await ready;
-      const result = await call('tools/call', {
-        name: 'servo_web_search',
-        arguments: { query: queryField.value, provider: providerField.value, limit: 8 },
-      });
+      const args = { query, provider: providerField.value, limit: 8 };
+      const fallback = () => withDeadline(window.openai.callTool('servo_web_search', args), 30_000);
+      let result;
+      if (!bridgeInitialized && typeof window.openai?.callTool === 'function') {
+        result = await fallback();
+      } else {
+        try {
+          result = await call('tools/call', { name: 'servo_web_search', arguments: args }, 30_000);
+        } catch (error) {
+          if (![-32601, 'HOST_TIMEOUT'].includes(error.code) || typeof window.openai?.callTool !== 'function') throw error;
+          result = await fallback();
+        }
+      }
       if (result.isError) throw new Error(result.content?.[0]?.text || 'Search failed.');
       render(result.structuredContent);
     } catch (error) {

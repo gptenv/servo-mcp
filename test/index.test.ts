@@ -152,25 +152,30 @@ describe('MCP Worker routes and server registration', () => {
 
     const searchResource = harness.resources.get('servo-web-search-ui')!;
     expect(searchResource.definition.mimeType).toBe('text/html;profile=mcp-app');
-    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v2.html');
+    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v3.html');
     for (const [name, tool] of harness.tools) {
-      if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser-v2.html');
+      if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser-v3.html');
+    }
+    for (const name of ['servo_web_search', 'servo_navigate', 'servo_evaluate', 'servo_screenshot']) {
+      expect(registeredTool(name).definition._meta).toMatchObject({
+        ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true,
+      });
     }
     expect(registeredTool('servo_app_open').definition._meta?.['openai/ui']?.entrypoints?.[0]?.type).toBe('global');
     expect(registeredTool('servo_app_open').definition.inputSchema.parse({})).toEqual({});
     expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']).toBeUndefined();
     expect(registeredTool('servo_inspect').definition._meta?.['openai/ui']).toBeUndefined();
-    const searchWidget = await searchResource.handler(new URL('ui://servo/search-v2.html'));
+    const searchWidget = await searchResource.handler(new URL('ui://servo/search-v3.html'));
     expect(searchWidget.contents[0].text).toContain('Servo web search');
     expect(searchWidget.contents[0].text).toContain('<option value="brave">Brave</option>');
     expect(searchWidget.contents[0].text).toContain('ui/initialize');
     expect(searchWidget.contents[0].text).toContain('ui/notifications/initialized');
 
     const browserResource = harness.resources.get('servo-browser-ui')!;
-    const widget = await browserResource.handler(new URL('ui://servo/browser-v2.html'));
+    const widget = await browserResource.handler(new URL('ui://servo/browser-v3.html'));
     expect(browserResource.definition.mimeType).toBe('text/html;profile=mcp-app');
     expect(widget.contents[0]).toMatchObject({
-      uri: 'ui://servo/browser-v2.html', mimeType: 'text/html;profile=mcp-app',
+      uri: 'ui://servo/browser-v3.html', mimeType: 'text/html;profile=mcp-app',
       _meta: {
         ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: ['https://worker.example'] } },
         'openai/widgetPrefersBorder': true,

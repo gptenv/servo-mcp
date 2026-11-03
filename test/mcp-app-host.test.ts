@@ -1,14 +1,14 @@
 /**
  * Headless MCP Apps host. It iframes the real browser widget, speaks the
  * ui/initialize bridge, and applies the CSP shapes hosts derive from
- * resourceDomains. Chrome is optional so CI without a browser still runs the
- * rest of the suite; this environment has Chrome and executes the cases.
+ * resourceDomains. CI supplies Chrome; local runs can set CHROME_PATH.
  */
 import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import widgetHtml from '../src/browser-widget.html';
+import searchWidgetHtml from '../src/search-widget.html';
 
 const ONE_PIXEL = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -91,6 +91,8 @@ function hostPage(): string {
     if (message.method === 'ui/notifications/initialized') { window.__initialized = true; return; }
     if (message.method === 'tools/call' && message.id !== undefined) {
       window.__calls.push(message.params);
+      if (window.__dropToolReply) return;
+      if (window.__missingToolMethod) { frame.contentWindow.postMessage({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }, '*'); return; }
       const result = window.__reply ? window.__reply(message.params) : { isError: true, content: [{ type: 'text', text: 'No harness reply.' }] };
       frame.contentWindow.postMessage({ jsonrpc: '2.0', id: message.id, result }, '*');
       frame.contentWindow.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/tool-input', params: { arguments: message.params.arguments } }, '*');
@@ -139,7 +141,7 @@ describe('MCP Apps browser widget host', () => {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Security-Policy': policy,
         });
-        response.end(widgetHtml);
+        response.end(url.searchParams.get('kind') === 'search' ? searchWidgetHtml : widgetHtml);
         return;
       }
       if (url.pathname === '/host') {
@@ -159,20 +161,29 @@ describe('MCP Apps browser widget host', () => {
     browser = await puppeteer.launch({
       executablePath,
       headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+      timeout: 45_000,
+      args: [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+      ],
     }) as { newPage: () => Promise<HostPage>; close: () => Promise<void> };
-  });
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  });
+  }, 30_000);
 
-  async function openWidget(csp: string) {
+  async function openWidget(csp: string, kind = 'browser') {
     if (!browser) throw new Error('Chrome is not available.');
     const page = await browser.newPage();
     await page.goto(`${origin}/host`, { waitUntil: 'domcontentloaded' });
-    await page.evaluate((src) => (window as unknown as { __load: (value: string) => void }).__load(src), `${origin}/widget?csp=${encodeURIComponent(csp)}`);
+    await page.evaluate((src) => (window as unknown as { __load: (value: string) => void }).__load(src), `${origin}/widget?kind=${kind}&csp=${encodeURIComponent(csp)}`);
     await page.waitForFunction(() => (window as unknown as { __initialized?: boolean }).__initialized, { timeout: 8000 });
     const frame = page.frames().find((entry) => entry.url().includes('/widget'));
     if (!frame) throw new Error('Widget frame was not created.');
@@ -271,6 +282,88 @@ describe('MCP Apps browser widget host', () => {
     await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#preview')?.naturalWidth === 1);
     const src = await frame.evaluate(() => document.querySelector<HTMLImageElement>('#preview')?.currentSrc ?? '');
     expect(src.startsWith('data:image/png;base64,')).toBe(true);
+    await page.close();
+  });
+
+  live('keeps the selected session and its image together in a mixed batch', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; img-src data:");
+    const selected = '00000000-0000-4000-8000-000000000002';
+    const result = {
+      isError: true,
+      structuredContent: { responses: [
+        { sessionID: 'other', ok: true, response: { imageIndex: 0 } },
+        { sessionID: selected, ok: true, response: { imageIndex: 1, page: { title: 'Selected tab' } } },
+        { sessionID: 'failed', ok: false, error: 'Unrelated error' },
+      ] },
+      content: [
+        { type: 'text', text: 'Two screenshots' },
+        { type: 'image', mimeType: 'image/png', data: ONE_PIXEL.toString('base64') },
+        { type: 'image', mimeType: 'image/png', data: Buffer.from(TWO_PIXEL).toString('base64') },
+      ],
+    };
+    await page.evaluate(({ input, result }) => (window as unknown as { __deliver(input: unknown, result: unknown): void }).__deliver(input, result), {
+      input: { actions: [{ sessionID: selected }] }, result,
+    });
+    await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#preview')?.dataset.state === 'loaded');
+    expect(await frame.evaluate(() => document.querySelector<HTMLImageElement>('#preview')!.naturalWidth)).toBe(2);
+    expect(await frame.evaluate(() => document.querySelector('#status')!.textContent)).toBe('Selected tab');
+    await page.close();
+  });
+
+  live('rejects an empty search and uses the host fallback for a missing bridge method', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'", 'search');
+    await frame.click('#search');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'Enter a search query.');
+    expect(await page.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls)).toEqual([]);
+    await page.evaluate(() => { (window as unknown as { __missingToolMethod: boolean }).__missingToolMethod = true; });
+    await frame.evaluate(() => {
+      (window as unknown as { openai: unknown }).openai = {
+        async callTool(name: string, args: { query: string }) {
+          return { structuredContent: { results: [{ title: name + ': ' + args.query, url: 'https://example.org' }] } };
+        },
+      };
+    });
+    await frame.type('#query', '  servo  ');
+    await frame.click('#search');
+    await frame.waitForFunction(() => document.querySelector('#results a')?.textContent === 'servo_web_search: servo');
+    await page.close();
+  });
+
+  live('recovers from an unanswered search without leaving its button disabled', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'", 'search');
+    await page.evaluate(() => { (window as unknown as { __dropToolReply: boolean }).__dropToolReply = true; });
+    await frame.evaluate(() => {
+      const clock: { setTimeout(callback: TimerHandler, delay?: number, ...args: unknown[]): number } = window;
+      const timer = clock.setTimeout.bind(window);
+      // Advance only this transport deadline. Keep the real message bridge and event loop.
+      clock.setTimeout = (callback, delay, ...args) => timer(callback, delay === 30_000 ? 1 : delay, ...args);
+      (window as unknown as { openai: unknown }).openai = {
+        async callTool() { return { structuredContent: { results: [] } }; },
+      };
+    });
+    await frame.type('#query', 'servo');
+    await frame.click('#search');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'No results found.');
+    expect(await frame.evaluate(() => document.querySelector<HTMLButtonElement>('#search')?.disabled)).toBe(false);
+    expect(await page.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls.length)).toBe(1);
+    await page.close();
+  });
+
+  live('displays rejected loads and retries without adopting a failed session ID', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'");
+    await page.evaluate(() => {
+      let attempt = 0;
+      (window as unknown as { __reply: () => unknown }).__reply = () => ++attempt === 1
+        ? { isError: true, structuredContent: { responses: [{ sessionID: 'uncreated', ok: false, error: 'Blocked URL' }] } }
+        : { isError: true, content: [{ type: 'text', text: 'Invalid arguments' }] };
+    });
+    await frame.type('#url', 'https://example.com/');
+    await frame.click('#load');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'Blocked URL');
+    await frame.click('#load');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'Invalid arguments');
+    const calls = await page.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls);
+    expect(calls).toEqual(Array(2).fill({ name: 'servo_navigate', arguments: { actions: [{ url: 'https://example.com/' }] } }));
     await page.close();
   });
 
