@@ -224,6 +224,30 @@ describe('MCP Apps browser widget host', () => {
     await page.close();
   });
 
+  live('populates the HTTP request and response from split ChatGPT globals on opening the widget', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:");
+    await frame.evaluate(() => {
+      const request = { method: 'POST', url: 'https://example.org/requested' };
+      const result = { kind: 'http', responses: [{ ok: true, actionIndex: 0, response: {
+        request, response: { status: 201, url: 'https://example.org/redirected', bodyBytes: 7 }, body: 'created',
+      } }] };
+      const deliver = (globals: unknown) => window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals } }));
+      deliver({ toolResponseMetadata: { call_tool_result: { content: [{ type: 'text', text: JSON.stringify(result) }] } } });
+      deliver({ toolResponseMetadata: { ui: { screenshots: [{ actionIndex: 0, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' }] } } });
+      deliver({ toolInput: { actions: [{ ...request, body: 'original body' }] } });
+    });
+    await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#http-responses img')?.naturalWidth === 1);
+    expect(await frame.evaluate(() => ({
+      url: document.querySelector<HTMLInputElement>('#http-responses input')!.value,
+      body: document.querySelector<HTMLTextAreaElement>('#http-responses details textarea')!.value,
+      response: document.querySelector('#http-responses section > pre')!.textContent,
+      status: document.querySelector('#http-responses h2')!.textContent,
+      browserHidden: document.querySelector<HTMLElement>('#browser-view')!.hidden,
+    }))).toEqual({ url: 'https://example.org/requested', body: 'original body', response: 'created', status: 'POST 201', browserHidden: true });
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([]);
+    await page.close();
+  });
+
   live('shows the hosted screenshot when data URLs are blocked and fills the URL from tool input', async () => {
     const csp = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${origin}`;
     const { page, frame } = await openWidget(csp);

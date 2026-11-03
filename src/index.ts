@@ -6,10 +6,10 @@ import searchWidgetHtml from './search-widget.html';
 import { searchWeb } from './web-search';
 import { ServoBrowserSession, type PageReadinessOptions } from './browser-session';
 import { assertPublicHttpUrl } from './security';
-import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
+import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, httpPreviewHtml, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser-v3.html';
-const HTTP_WIDGET_URI = 'ui://servo/http-v1.html';
+const HTTP_WIDGET_URI = 'ui://servo/http-v2.html';
 const SEARCH_WIDGET_URI = 'ui://servo/search-v3.html';
 const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
@@ -190,12 +190,15 @@ function createServer(env: Env, publicOrigin: string) {
     ['servo-browser-ui', WIDGET_URI, 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-v2', 'ui://servo/browser-v2.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-original', 'ui://servo/browser.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-http-ui-v1', 'ui://servo/http-v1.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui', HTTP_WIDGET_URI, 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
   ]) {
     server.registerResource(name, uri, {
       title, description, mimeType: 'text/html;profile=mcp-app', _meta: browserWidgetMeta,
     }, async (requested) => ({ contents: [{ uri: requested.href,
-      mimeType: 'text/html;profile=mcp-app', text: uri === HTTP_WIDGET_URI ? widgetHtml.replace('data-view="browser"', 'data-view="http"') : widgetHtml,
+      mimeType: 'text/html;profile=mcp-app', text: name.startsWith('servo-http-ui')
+        ? widgetHtml.replace('data-view="browser"', 'data-view="http"').replace('<main id="browser-view">', '<main id="browser-view" hidden>')
+        : widgetHtml,
       _meta: browserWidgetMeta,
     }] }));
   }
@@ -345,20 +348,35 @@ function createServer(env: Env, publicOrigin: string) {
   ));
 
   const httpUiMeta = { ui: { resourceUri: HTTP_WIDGET_URI }, 'openai/outputTemplate': HTTP_WIDGET_URI };
-  const runHttpActions = async <T>(actions: T[], operation: (action: T) => Promise<object>) => ({
-    kind: 'http',
-    responses: await Promise.all(actions.map(async (action, actionIndex) => {
-      try { return { actionIndex, ok: true, response: await operation(action) }; }
-      catch (error) { return { actionIndex, ok: false, ...sessionError(error) }; }
-    })),
-  });
+  const runHttpActions = async (actions: Array<z.infer<typeof httpRequestSchema>>) => {
+    const widgetScreenshots: Array<{ actionIndex: number; mimeType: string; url: string; data?: string }> = [];
+    const responses = await Promise.all(actions.map(async (action, actionIndex) => {
+      try {
+        const response = await requestHttp(action);
+        try {
+          const id = crypto.randomUUID();
+          const capture = await session(id).captureHttpPreview(httpPreviewHtml(response));
+          widgetScreenshots.push({ actionIndex, mimeType: 'image/png',
+            url: new URL(`/screenshots/${id}/${capture.token}`, publicOrigin).href,
+            ...(capture.inline ? { data: toBase64(capture.inline) } : {}),
+          });
+        } catch {
+          // A failed preview must never cause a completed request to be retried.
+        }
+        return { actionIndex, ok: true, response };
+      } catch (error) {
+        return { actionIndex, ok: false, request: { method: action.method, url: action.url }, ...sessionError(error) };
+      }
+    }));
+    return { kind: 'http', responses, widgetScreenshots };
+  };
 
   server.registerTool('servo_http_request', {
     title: 'Servo HTTP request',
     description: 'Send an array of public HTTP(S) requests. Each actions entry accepts any valid Fetch API method (including custom extension methods), optional custom request headers and UTF-8 body, redirect policy, timeout, and response-size limit. Returns one response object per request with status, response headers, body (or base64 for binary), and citation-style page results. CONNECT, TRACE, and TRACK are forbidden by the Fetch API.',
     inputSchema: z.object({ actions: z.array(httpRequestSchema.strict()).min(1).max(20) }).strict(),
     _meta: httpUiMeta,
-  }, async ({ actions }) => safely(() => runHttpActions(actions, requestHttp)));
+  }, async ({ actions }) => safely(() => runHttpActions(actions)));
 
   for (const method of HTTP_METHODS) {
     const name = `servo_http_${method.toLowerCase()}`;
@@ -367,7 +385,7 @@ function createServer(env: Env, publicOrigin: string) {
       description: `Send an array of ${method} requests to public HTTP(S) URLs with optional custom request headers${['GET', 'HEAD'].includes(method) ? '' : ' and UTF-8 body'}. Returns one response object per request with status, headers, bounded body data, and citation-style page results.`,
       inputSchema: z.object({ actions: z.array(httpVerbRequestSchema.strict()).min(1).max(20) }).strict(),
       _meta: httpUiMeta,
-    }, async ({ actions }) => safely(() => runHttpActions(actions, (action) => requestHttp({ ...action, method }))));
+    }, async ({ actions }) => safely(() => runHttpActions(actions.map((action) => ({ ...action, method })))));
   }
 
   server.registerTool('servo_evaluate', {

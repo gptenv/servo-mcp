@@ -175,3 +175,15 @@ export async function requestHttp(input: HttpRequest) {
     bodyBase64: content === undefined ? base64(bytes) : null,
   };
 }
+
+// The preview renderer receives only the completed response. It has no network access.
+export function httpPreviewHtml(result: Awaited<ReturnType<typeof requestHttp>>): string {
+  const type = result.response.contentType?.split(';')[0].trim().toLowerCase() ?? '';
+  if (type === 'text/html' && result.body) return result.body;
+  if (result.bodyBase64 && /^image\/(png|jpeg|gif|webp)$/.test(type)) {
+    return `<!doctype html><img style="max-width:100%" src="data:${type};base64,${result.bodyBase64}">`;
+  }
+  const escape = (text: string) => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  const preview = result.body || (result.response.bodyBytes ? `Binary response (${result.response.bodyBytes} bytes)` : 'No response body.');
+  return `<!doctype html><meta charset="utf-8"><h2>${escape(result.request.method)} ${result.response.status}</h2><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${escape(preview)}</pre>`;
+}

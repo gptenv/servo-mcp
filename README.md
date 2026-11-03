@@ -48,13 +48,19 @@ and return ordered objects in the top-level `responses` array, each with
 `actionIndex`, `ok`, and the request response or error. A sibling `metadata`
 object summarizes response, success, and failure counts. Each action in the general tool
 accepts any valid Fetch API method (including extension methods), request
-headers and a UTF-8 body; convenience tools provide common verbs. Results
+headers and a UTF-8 body; convenience tools provide common verbs.
 Each HTTP action response includes the HTTP status, final URL, response headers, bounded response body
 (base64 for binary content), and a `results` array with title, URL, snippet,
 and readable page content. Redirect destinations are checked against the
 public-network policy, cross-origin redirects discard credentials, and the
 request duration and response size are capped. The HTTP tools can still cause
 remote side effects, so use POST/PUT/PATCH/DELETE only when intended.
+
+The chat widget opens with the original request and its response. Each completed
+HTTP action also gets an 800 × 600 Servo screenshot of the returned content.
+A temporary offline renderer uses the captured body, with scripts and external
+resources blocked. Opening the widget does not repeat the request. Hosted PNGs
+expire after 24 hours. If capture fails, the HTTP response is still available.
 
 `servo_navigate` and `servo_inspect` also include this same citation-style
 `results` entry for rendered pages, while retaining their existing `page`

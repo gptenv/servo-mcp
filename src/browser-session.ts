@@ -1547,6 +1547,36 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }
   }
 
+  async captureHttpPreview(html: string): Promise<{ token: string; byteLength: number; inline?: Uint8Array }> {
+    // Every HTTP action uses a fresh object. Only the PNG is persisted for the widget.
+    const url = 'https://servo-http-preview.invalid/';
+    const readiness = { strategy: 'load', maxDurationMs: 5000 };
+    let documentSent = false;
+    const runtime = await createServoWorkerRuntime(servoWasm, {
+      url, width: 800, height: 600, readiness, scriptBudget: 5_000_000,
+      fetchImpl: async (input: string) => {
+        if (documentSent || String(input) !== url) return new Response(null, { status: 403 });
+        documentSent = true;
+        return new Response(html, { headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'",
+        } });
+      },
+      webSocketFactory: () => { throw new Error('HTTP previews are offline.'); },
+      maxSessionSubrequests: 32,
+    });
+    try {
+      const png: Uint8Array = await runtime.screenshot({ readiness });
+      if (!documentSent || !png.byteLength || png.byteLength > MAX_RESPONSE_BYTES) throw new Error('Invalid HTTP preview.');
+      const token = crypto.randomUUID();
+      this.ctx.storage.transactionSync(() => this.storeScreenshotChunks(token, png, Date.now() + SCREENSHOT_RETENTION_MS));
+      await this.scheduleNextAlarm();
+      return { token, byteLength: png.byteLength, inline: png.byteLength <= 96 * 1024 ? png : undefined };
+    } finally {
+      runtime.reset();
+    }
+  }
+
   async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
     if (!(png instanceof Uint8Array) || png.byteLength === 0) throw new TypeError('Screenshot bytes are empty.');
     if (png.byteLength > MAX_RESPONSE_BYTES) throw new RangeError('Screenshot exceeds 8388608 bytes.');

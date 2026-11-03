@@ -8,6 +8,7 @@
   body { margin: 0; padding: 16px; }
   html[data-view="http"] #browser-view, html[data-view="browser"] #http-view { display: none; }
   #http-responses { overflow-wrap: anywhere; }
+  #http-responses img { max-width: 100%; height: auto; }
   form { display: grid; gap: 10px; }
   label { display: grid; gap: 4px; }
   input, textarea, button { font: inherit; padding: 8px; }
@@ -15,7 +16,8 @@
   button { justify-self: start; cursor: pointer; }
   button:disabled { cursor: progress; }
   #status { min-height: 1.5em; }
-  #preview[src] { display: block; max-width: 100%; height: auto; border: 1px solid #8886; }
+  #preview[data-state="loaded"][src] { display: block; max-width: 100%; height: auto; border: 1px solid #8886; }
+  #preview { display: none; }
   #preview:not([src]) { display: none; }
   pre { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
 </style>
@@ -45,6 +47,10 @@
   let bridgeInitialized = false;
   let suppressAutoShot = 0;
   let refreshing = false;
+  const chatGlobals = {};
+  let httpActions = [];
+  let httpResponses;
+  let httpShots = [];
   let lastWidth = 0;
   let lastHeight = 0;
   const urlField = document.querySelector('#url');
@@ -104,7 +110,12 @@
   }
   function applyInput(params) {
     const input = params?.arguments ?? params ?? {};
-    const action = actionList(input)[0];
+    const actions = actionList(input);
+    if (Array.isArray(input.actions)) {
+      httpActions = actions;
+      if (httpResponses) renderHttp(httpResponses);
+    }
+    const action = actions[0];
     if (!action) return;
     const url = httpUrl(action.url);
     if (url && urlField.dataset.userEdited !== '1') urlField.value = url;
@@ -193,19 +204,46 @@
     }
   }
   function renderHttp(responses) {
+    httpResponses = responses;
     const rows = document.querySelector('#http-responses');
     rows.replaceChildren();
+    function requestField(labelText, value, multiline = false) {
+      const label = document.createElement('label');
+      const field = document.createElement(multiline ? 'textarea' : 'input');
+      field.readOnly = true;
+      field.value = value;
+      label.append(labelText, field);
+      return label;
+    }
     for (const entry of responses) {
       const section = document.createElement('section');
       const heading = document.createElement('h2');
       const body = document.createElement('pre');
       const payload = entry.response;
+      const input = httpActions[entry.actionIndex];
+      const request = payload?.request ?? entry.request ?? input;
+      section.append(heading);
+      if (request?.url) {
+        section.append(requestField('Request URL', request.url));
+        if (request.method) section.append(requestField('Method', request.method));
+      }
+      if (input?.body !== undefined || input?.headers) {
+        const params = document.createElement('details');
+        const label = document.createElement('summary');
+        label.textContent = 'Request details';
+        params.append(label);
+        if (input.headers) params.append(requestField('Request headers', JSON.stringify(input.headers, null, 2), true));
+        if (input.body !== undefined) params.append(requestField('Request body', input.body, true));
+        section.append(params);
+      }
       if (entry.ok && payload?.response) {
-        const { request, response } = payload;
+        const response = payload.response;
         heading.textContent = [request.method, response.status, response.statusText].filter(Boolean).join(' ');
-        const url = document.createElement('p');
-        url.textContent = response.url || request.url;
-        section.append(heading, url);
+        if (response.url && response.url !== request.url) {
+          const finalUrl = document.createElement('p');
+          finalUrl.textContent = 'Final URL: ' + response.url;
+          section.append(finalUrl);
+        }
         const summary = payload.results?.[0];
         if (summary?.title) {
           const title = document.createElement('strong');
@@ -217,19 +255,49 @@
           ? 'Binary response (' + response.bodyBytes + ' bytes)' : 'No response body.';
         if (response.truncated || (payload.body?.length > 20000 && preview)) body.textContent += '\n… (preview truncated)';
       } else {
-        heading.textContent = 'Request ' + (entry.actionIndex + 1) + ' failed';
+        heading.textContent = [request?.method, 'Request ' + (entry.actionIndex + 1) + ' failed'].filter(Boolean).join(' · ');
         body.textContent = entry.error || 'No HTTP response was received.';
-        section.append(heading);
       }
       section.append(body);
+      if (entry.ok) {
+        const shot = httpShots.find((item) => item.actionIndex === entry.actionIndex);
+        const previewStatus = document.createElement('p');
+        previewStatus.textContent = shot ? 'Loading response screenshot…' : 'Response screenshot unavailable.';
+        section.append(previewStatus);
+        if (shot) {
+          const image = document.createElement('img');
+          image.hidden = true;
+          image.alt = 'Screenshot of HTTP response ' + (entry.actionIndex + 1);
+          image.onload = () => { image.hidden = false; previewStatus.hidden = true; reportSize(); };
+          image.onerror = () => {
+            if (shot.url && image.src !== shot.url) { image.src = shot.url; return; }
+            image.remove();
+            previewStatus.textContent = 'Response screenshot unavailable.';
+            reportSize();
+          };
+          section.append(image);
+          image.src = shot.data ? 'data:image/png;base64,' + shot.data : shot.url;
+        }
+      }
       rows.append(section);
     }
+    document.querySelector('#browser-view').hidden = true;
     document.documentElement.dataset.view = 'http';
     reportSize();
   }
   function applyResult(result, autoShot = true) {
     if (!result) return false;
-    const data = result.structuredContent;
+    let data = result.structuredContent ?? (result.responses ? result : undefined);
+    if (!data?.responses && Array.isArray(result.content)) {
+      const text = result.content.find((part) => part.type === 'text')?.text;
+      try { if (text) data = JSON.parse(text); } catch { /* Plain-text errors aren't JSON. */ }
+    }
+    result = { ...result, structuredContent: data };
+    const incomingShots = result._meta?.ui?.screenshots;
+    if (Array.isArray(incomingShots) && incomingShots.some((item) => Number.isInteger(item?.actionIndex))) {
+      httpShots = incomingShots;
+      if (!data?.responses && httpResponses) { renderHttp(httpResponses); return true; }
+    }
     if (Array.isArray(data?.responses) && (data.kind === 'http' ||
         data.responses.some((entry) => entry?.response?.request && entry.response.response))) {
       renderHttp(data.responses);
@@ -257,22 +325,28 @@
     const shots = screenshotList(result);
     const shown = showScreenshot(preferredShot(shots) || {});
     if (autoShot && !shown && entry?.ok && entry.sessionID && page && suppressAutoShot === 0) refreshScreenshot(entry.sessionID);
+    if (!entry && !data && !shown) return false;
     if (page) statusField.textContent = page.title || pageUrl || statusField.textContent || 'Rendered';
     else if (shown && !statusField.textContent) statusField.textContent = 'Rendered';
     details.textContent = describe(result);
     reportSize();
     return true;
   }
-  function applyOpenAi(openai = window.openai) {
-    if (!openai) return;
-    if (openai.toolInput) applyInput({ arguments: openai.toolInput });
-    const envelope = openai.toolResponseMetadata?.mcp_tool_result || openai.toolResponseMetadata?.call_tool_result;
-    if (!openai.toolOutput && !envelope && !openai.toolResponseMetadata) return;
+  function applyOpenAi(delta) {
+    for (const key of ['toolInput', 'toolOutput', 'toolResponseMetadata']) {
+      const value = delta?.[key] ?? window.openai?.[key];
+      if (value != null) chatGlobals[key] = value;
+    }
+    if (chatGlobals.toolInput) applyInput(chatGlobals.toolInput);
+    const meta = chatGlobals.toolResponseMetadata;
+    const output = chatGlobals.toolOutput;
+    const result = meta?.mcp_tool_result ?? meta?.call_tool_result ?? {};
+    if (!output && !meta) return;
     applyResult({
-      structuredContent: openai.toolOutput || envelope?.structuredContent,
-      content: envelope?.content || [],
-      _meta: envelope?._meta || openai.toolResponseMetadata,
-      isError: envelope?.isError,
+      structuredContent: output?.structuredContent ?? (output?.responses ? output : result.structuredContent),
+      content: output?.content ?? result.content ?? (Array.isArray(output) ? output : undefined),
+      _meta: { ...meta, ...result._meta, ...output?._meta },
+      isError: output?.isError ?? result.isError,
     });
   }
   function handle(message) {

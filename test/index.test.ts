@@ -61,6 +61,7 @@ function makeSession(): Session {
     reload: vi.fn(async () => ({ action: 'reload' })),
     wait: vi.fn(async () => ({ action: 'wait' })),
     screenshot: vi.fn(async () => ({ page: { title: 'Example' }, png })),
+    captureHttpPreview: vi.fn(async () => ({ token: crypto.randomUUID(), byteLength: png.byteLength, inline: png })),
     publishWidgetScreenshot: vi.fn(async () => ({ token: '00000000-0000-4000-8000-0000000000aa' })),
     fetch: vi.fn(async () => new Response(null, { status: 404 })),
     startScreenRecording: vi.fn(async (fps: number, maxDurationSeconds: number) => ({ recordingId: '00000000-0000-4000-8000-000000000003', status: 'recording', fps, maxDurationSeconds })),
@@ -155,7 +156,7 @@ describe('MCP Worker routes and server registration', () => {
     expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v3.html');
     for (const [name, tool] of harness.tools) {
       if (name === 'servo_web_search') continue;
-      const expectedUri = name.startsWith('servo_http_') ? 'ui://servo/http-v1.html' : 'ui://servo/browser-v3.html';
+      const expectedUri = name.startsWith('servo_http_') ? 'ui://servo/http-v2.html' : 'ui://servo/browser-v3.html';
       expect(tool.definition._meta.ui.resourceUri).toBe(expectedUri);
       expect(tool.definition._meta['openai/outputTemplate']).toBe(expectedUri);
     }
@@ -174,7 +175,7 @@ describe('MCP Worker routes and server registration', () => {
     expect(searchWidget.contents[0].text).toContain('ui/initialize');
     expect(searchWidget.contents[0].text).toContain('ui/notifications/initialized');
 
-    const httpResource = await harness.resources.get('servo-http-ui')!.handler(new URL('ui://servo/http-v1.html'));
+    const httpResource = await harness.resources.get('servo-http-ui')!.handler(new URL('ui://servo/http-v2.html'));
     expect(httpResource.contents[0].text).toContain('<html lang="en" data-view="http">');
     const browserResource = harness.resources.get('servo-browser-ui')!;
     const widget = await browserResource.handler(new URL('ui://servo/browser-v3.html'));
@@ -580,7 +581,7 @@ describe('focused browser tools', () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it('batches HTTP actions in order with isolated failures and no browser allocation', async () => {
+  it('batches HTTP actions in order with isolated failures and no interactive browser session', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: URL) => new Response(url.pathname)));
     try {
       for (const [name, tool] of harness.tools) {
@@ -594,9 +595,10 @@ describe('focused browser tools', () => {
           { actionIndex: 1, ok: false, error: expect.stringMatching(/Private, local/) },
           { actionIndex: 2, ok: true, response: { request: { url: 'https://example.com/third' } } },
         ]);
+        expect(response._meta.ui.screenshots.map((s: { actionIndex: number }) => s.actionIndex).sort()).toEqual([0, 2]);
         expect(() => tool.definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
       }
-      expect(env.BROWSER_SESSIONS.getByName).not.toHaveBeenCalled();
+      expect(defaultSession.initialize).not.toHaveBeenCalled();
       expect(() => registeredTool('servo_navigate').definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
     } finally { vi.unstubAllGlobals(); }
   });
