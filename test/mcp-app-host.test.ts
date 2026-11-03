@@ -1,14 +1,14 @@
 /**
  * Headless MCP Apps host. It iframes the real browser widget, speaks the
  * ui/initialize bridge, and applies the CSP shapes hosts derive from
- * resourceDomains. Chrome is optional so CI without a browser still runs the
- * rest of the suite; this environment has Chrome and executes the cases.
+ * resourceDomains. CI supplies Chrome; local runs can set CHROME_PATH.
  */
 import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import widgetHtml from '../src/browser-widget.html';
+import searchWidgetHtml from '../src/search-widget.html';
 
 const ONE_PIXEL = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -91,6 +91,7 @@ function hostPage(): string {
     if (message.method === 'ui/notifications/initialized') { window.__initialized = true; return; }
     if (message.method === 'tools/call' && message.id !== undefined) {
       window.__calls.push(message.params);
+      if (window.__missingToolMethod) { frame.contentWindow.postMessage({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }, '*'); return; }
       const result = window.__reply ? window.__reply(message.params) : { isError: true, content: [{ type: 'text', text: 'No harness reply.' }] };
       frame.contentWindow.postMessage({ jsonrpc: '2.0', id: message.id, result }, '*');
       frame.contentWindow.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/tool-input', params: { arguments: message.params.arguments } }, '*');
@@ -139,7 +140,7 @@ describe('MCP Apps browser widget host', () => {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Security-Policy': policy,
         });
-        response.end(widgetHtml);
+        response.end(url.searchParams.get('kind') === 'search' ? searchWidgetHtml : widgetHtml);
         return;
       }
       if (url.pathname === '/host') {
@@ -168,11 +169,11 @@ describe('MCP Apps browser widget host', () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
-  async function openWidget(csp: string) {
+  async function openWidget(csp: string, kind = 'browser') {
     if (!browser) throw new Error('Chrome is not available.');
     const page = await browser.newPage();
     await page.goto(`${origin}/host`, { waitUntil: 'domcontentloaded' });
-    await page.evaluate((src) => (window as unknown as { __load: (value: string) => void }).__load(src), `${origin}/widget?csp=${encodeURIComponent(csp)}`);
+    await page.evaluate((src) => (window as unknown as { __load: (value: string) => void }).__load(src), `${origin}/widget?kind=${kind}&csp=${encodeURIComponent(csp)}`);
     await page.waitForFunction(() => (window as unknown as { __initialized?: boolean }).__initialized, { timeout: 8000 });
     const frame = page.frames().find((entry) => entry.url().includes('/widget'));
     if (!frame) throw new Error('Widget frame was not created.');
@@ -296,6 +297,25 @@ describe('MCP Apps browser widget host', () => {
     await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#preview')?.dataset.state === 'loaded');
     expect(await frame.evaluate(() => document.querySelector<HTMLImageElement>('#preview')!.naturalWidth)).toBe(2);
     expect(await frame.evaluate(() => document.querySelector('#status')!.textContent)).toBe('Selected tab');
+    await page.close();
+  });
+
+  live('rejects an empty search and uses the host fallback for a missing bridge method', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'", 'search');
+    await frame.click('#search');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'Enter a search query.');
+    expect(await page.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls)).toEqual([]);
+    await page.evaluate(() => { (window as unknown as { __missingToolMethod: boolean }).__missingToolMethod = true; });
+    await frame.evaluate(() => {
+      (window as unknown as { openai: unknown }).openai = {
+        async callTool(name: string, args: { query: string }) {
+          return { structuredContent: { results: [{ title: name + ': ' + args.query, url: 'https://example.org' }] } };
+        },
+      };
+    });
+    await frame.type('#query', '  servo  ');
+    await frame.click('#search');
+    await frame.waitForFunction(() => document.querySelector('#results a')?.textContent === 'servo_web_search: servo');
     await page.close();
   });
 

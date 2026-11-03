@@ -139,16 +139,26 @@
   async function runSearch(event) {
     event.preventDefault();
     if (searching) return;
+    const query = queryField.value.trim();
+    if (!query) {
+      document.querySelector('#status').textContent = 'Enter a search query.';
+      queryField.focus();
+      return;
+    }
     searching = true;
     const status = document.querySelector('#status');
     searchButton.disabled = true;
     status.textContent = 'Searching…';
     try {
       await ready;
-      const result = await call('tools/call', {
-        name: 'servo_web_search',
-        arguments: { query: queryField.value, provider: providerField.value, limit: 8 },
-      });
+      const args = { query, provider: providerField.value, limit: 8 };
+      let result;
+      try {
+        result = await call('tools/call', { name: 'servo_web_search', arguments: args });
+      } catch (error) {
+        if (error.code !== -32601 || typeof window.openai?.callTool !== 'function') throw error;
+        result = await window.openai.callTool('servo_web_search', args);
+      }
       if (result.isError) throw new Error(result.content?.[0]?.text || 'Search failed.');
       render(result.structuredContent);
     } catch (error) {

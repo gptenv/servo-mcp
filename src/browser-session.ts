@@ -7,6 +7,9 @@ import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const SCREENSHOT_CHUNK_BYTES = 512 * 1024;
+const SCREENSHOT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const MAX_RETAINED_SCREENSHOTS = 8;
 const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
 const SNAPSHOT_CHUNK_CHARS = 200_000;
@@ -487,6 +490,23 @@ export class ServoBrowserSession extends DurableObject<Env> {
           updated_at INTEGER NOT NULL
         )
       `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS browser_widget_screenshot_chunk (
+          token TEXT NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          png_blob BLOB NOT NULL,
+          PRIMARY KEY (token, chunk_index)
+        )
+      `);
+      const legacy = ctx.storage.sql.exec<{ token: string; png_blob: ArrayBuffer; updated_at: number }>(
+        'SELECT token, png_blob, updated_at FROM browser_widget_screenshot WHERE singleton = 1',
+      ).toArray()[0];
+      if (legacy) ctx.storage.transactionSync(() => {
+        const expiresAt = legacy.updated_at + SCREENSHOT_RETENTION_MS;
+        if (expiresAt > Date.now()) this.storeScreenshotChunks(legacy.token, sqlBytes(legacy.png_blob), expiresAt);
+        ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot');
+      });
       const active = ctx.storage.sql.exec<{ id: string; fps: number }>(
         "SELECT id, fps FROM browser_recording WHERE status = 'recording' LIMIT 1",
       ).toArray()[0];
@@ -561,6 +581,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
       "SELECT MIN(expires_at) AS expires_at FROM browser_recording WHERE status IN ('ready', 'failed')",
     ).toArray()[0]?.expires_at;
     if (typeof recordingExpiry === 'number') candidates.push(recordingExpiry);
+    const screenshotExpiry = this.ctx.storage.sql.exec<{ expires_at: number | null }>(
+      'SELECT MIN(expires_at) AS expires_at FROM browser_widget_screenshot_chunk WHERE chunk_index = 0',
+    ).toArray()[0]?.expires_at;
+    if (typeof screenshotExpiry === 'number') candidates.push(screenshotExpiry);
     const encoding = this.ctx.storage.sql.exec<{ id: string }>(
       "SELECT id FROM browser_recording WHERE status = 'encoding' LIMIT 1",
     ).toArray()[0];
@@ -694,7 +718,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   private clearStoredPage(): void {
     this.ctx.storage.sql.exec('DELETE FROM browser_snapshot');
     this.ctx.storage.sql.exec('DELETE FROM browser_asset');
-    this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot');
+    this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot_chunk');
   }
 
   private writeStatus(status: SessionStatus, expiresAt = Date.now()): void {
@@ -1072,6 +1096,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private async expireIfIdle(): Promise<void> {
+    this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot_chunk WHERE expires_at <= ?', Date.now());
     await this.pruneExpiredRecordings();
     const row = this.row();
     if (row?.status === 'active') {
@@ -1496,16 +1521,34 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
   }
 
+  private storeScreenshotChunks(token: string, png: Uint8Array, expiresAt: number): void {
+    for (let offset = 0; offset < png.byteLength; offset += SCREENSHOT_CHUNK_BYTES) {
+      this.ctx.storage.sql.exec(
+        'INSERT INTO browser_widget_screenshot_chunk (token, chunk_index, expires_at, png_blob) VALUES (?, ?, ?, ?)',
+        token, offset / SCREENSHOT_CHUNK_BYTES, expiresAt, sqlBuffer(png.subarray(offset, offset + SCREENSHOT_CHUNK_BYTES)),
+      );
+    }
+  }
+
   async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
     if (!(png instanceof Uint8Array) || png.byteLength === 0) throw new TypeError('Screenshot bytes are empty.');
     if (png.byteLength > MAX_RESPONSE_BYTES) throw new RangeError('Screenshot exceeds 8388608 bytes.');
     return this.serial(async () => {
+      const now = Date.now();
+      const session = this.row();
+      if (session?.status !== 'active' || session.expires_at <= now) throw new Error('Browser session is not active.');
       const token = crypto.randomUUID();
-      this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot');
-      this.ctx.storage.sql.exec(
-        'INSERT INTO browser_widget_screenshot (singleton, token, png_blob, updated_at) VALUES (1, ?, ?, ?)',
-        token, sqlBuffer(png), Date.now(),
-      );
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec('DELETE FROM browser_widget_screenshot_chunk WHERE expires_at <= ?', now);
+        this.storeScreenshotChunks(token, png, now + SCREENSHOT_RETENTION_MS);
+        this.ctx.storage.sql.exec(
+          `DELETE FROM browser_widget_screenshot_chunk WHERE token IN (
+             SELECT token FROM browser_widget_screenshot_chunk WHERE chunk_index = 0
+             ORDER BY expires_at DESC, rowid DESC LIMIT -1 OFFSET ?
+           )`, MAX_RETAINED_SCREENSHOTS,
+        );
+      });
+      await this.scheduleNextAlarm();
       return { token };
     });
   }
@@ -1558,16 +1601,16 @@ export class ServoBrowserSession extends DurableObject<Env> {
       return new Response('Not found', { status: 404 });
     }
     return this.serial(async () => {
-      const row = this.ctx.storage.sql.exec<{ token: string; png_blob: ArrayBuffer }>(
-        'SELECT token, png_blob FROM browser_widget_screenshot WHERE singleton = 1',
-      ).toArray()[0];
-      if (!row || row.token !== token) return new Response('Not found', { status: 404 });
-      const bytes = sqlBytes(row.png_blob);
-      const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      const chunks = this.ctx.storage.sql.exec<{ png_blob: ArrayBuffer }>(
+        'SELECT png_blob FROM browser_widget_screenshot_chunk WHERE token = ? AND expires_at > ? ORDER BY chunk_index',
+        token, Date.now(),
+      ).toArray();
+      if (!chunks.length) return new Response('Not found', { status: 404 });
+      const body = new Blob(chunks.map((chunk) => chunk.png_blob), { type: 'image/png' });
       return new Response(body, {
         headers: {
           'Content-Type': 'image/png',
-          'Content-Length': String(bytes.byteLength),
+          'Content-Length': String(body.size),
           'Cache-Control': 'private, no-store',
           'X-Content-Type-Options': 'nosniff',
         },

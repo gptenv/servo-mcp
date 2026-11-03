@@ -27,6 +27,22 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - name: Enable headless widget tests
+        shell: bash
+        run: |
+          chrome=$(command -v google-chrome || command -v chromium || true)
+          if [[ -z "$chrome" ]]; then
+            chrome=$(node --input-type=module <<'JS'
+          import { install } from '@puppeteer/browsers';
+          import { PUPPETEER_REVISIONS } from 'puppeteer-core';
+          const browser = 'chrome-headless-shell';
+          const binary = await install({ browser, buildId: PUPPETEER_REVISIONS[browser], cacheDir: process.env.RUNNER_TEMP });
+          console.log(binary.executablePath);
+          JS
+            )
+          fi
+          test -x "$chrome"
+          echo "CHROME_PATH=$chrome" >> "$GITHUB_ENV"
       - run: npm test
 
   build-worker:

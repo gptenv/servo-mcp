@@ -169,7 +169,9 @@ Cloudflare `createMcpHandler` with stateless Streamable HTTP and the MCP Apps UI
 resource convention. The browser widget completes the `ui/initialize` handshake
 before it accepts tool input or calls tools. Viewport screenshots are stored on
 the session and returned to the widget in tool-result `_meta` (a Worker URL
-plus inline PNG bytes when the capture is at most 96 KiB). The browser UI
+plus inline PNG bytes when the capture is at most 96 KiB). Each tab retains its eight
+most recent screenshots for up to 24 hours. Closing the tab revokes their URLs.
+Larger captures are stored as 512 KiB chunks. The browser UI
 resource allows that Worker origin in `ui.csp.resourceDomains` and
 `openai/widgetCSP.resource_domains`, and the widget falls back from a `data:`
 URL to the hosted PNG when a host CSP blocks one of them. Browser-session continuity lives in per-session Durable

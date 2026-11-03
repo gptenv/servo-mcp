@@ -1092,8 +1092,9 @@ describe('session termination', () => {
 });
 
 describe('widget screenshot bytes', () => {
-  it('publishes a PNG and serves it only for the current token', async () => {
+  it('preserves published PNGs across captures and revokes them on close', async () => {
     const session = await newSession();
+    await session.initialize(initOptions());
     const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     await expect(session.publishWidgetScreenshot(new Uint8Array())).rejects.toThrow(/empty/);
     await expect(session.publishWidgetScreenshot('nope' as unknown as Uint8Array)).rejects.toThrow(/empty/);
@@ -1109,7 +1110,7 @@ describe('widget screenshot bytes', () => {
     expect(ok.headers.get('x-content-type-options')).toBe('nosniff');
     expect(new Uint8Array(await ok.arrayBuffer())).toEqual(pngBytes);
     const replaced = await session.publishWidgetScreenshot(new Uint8Array([1, 2, 3]));
-    expect((await session.fetch(new Request(url))).status).toBe(404);
+    expect((await session.fetch(new Request(url))).status).toBe(200);
     expect(new Uint8Array(await (await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/not-a-token`))).status).toBe(404);
     expect((await session.fetch(new Request('https://worker.example/screenshots/short'))).status).toBe(404);
@@ -1117,6 +1118,44 @@ describe('widget screenshot bytes', () => {
     await session.close();
     expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).status).toBe(404);
   });
+  it('round-trips a multi-megabyte capture, evicts the ninth-oldest token, and expires the rest', async () => {
+    const session = await newSession();
+    await session.initialize(initOptions());
+    const png = Uint8Array.from({ length: 2 * 1024 * 1024 + 31 }, (_, i) => (i * 17) % 251);
+    const request = (token: string) => new Request(`https://worker.example/screenshots/${UUID}/${token}`);
+    const first = await session.publishWidgetScreenshot(png);
+    const fetched = await session.fetch(request(first.token));
+    expect(fetched.status).toBe(200);
+    expect(Buffer.from(await fetched.arrayBuffer()).equals(Buffer.from(png))).toBe(true);
+    const sizes = sql().exec<{ size: number }>(
+      'SELECT length(png_blob) AS size FROM browser_widget_screenshot_chunk WHERE token = ? ORDER BY chunk_index', first.token,
+    ).toArray().map(row => row.size);
+    expect(sizes).toEqual([524288, 524288, 524288, 524288, 31]);
+    const small = new Uint8Array([1]);
+    const second = await session.publishWidgetScreenshot(small);
+    for (let i = 0; i < 7; i++) await session.publishWidgetScreenshot(small);
+    expect((await session.fetch(request(first.token))).status).toBe(404);
+    expect((await session.fetch(request(second.token))).status).toBe(200);
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
+    expect((await session.fetch(request(second.token))).status).toBe(404);
+    await session.alarm();
+    expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([]);
+  });
+
+  it('migrates a published singleton without changing its URL or extending its lifetime', async () => {
+    await newSession();
+    const token = crypto.randomUUID();
+    const updated = Date.now() - 60_000;
+    sql().exec('INSERT INTO browser_widget_screenshot (singleton, token, png_blob, updated_at) VALUES (1, ?, ?, ?)',
+      token, new Uint8Array([4, 2]).buffer, updated);
+    const restored = new mod.ServoBrowserSession(asDoState(state), {} as Env);
+    const request = new Request(`https://worker.example/screenshots/${UUID}/${token}`);
+    expect([...new Uint8Array(await (await restored.fetch(request)).arrayBuffer())]).toEqual([4, 2]);
+    expect(sql().exec('SELECT token FROM browser_widget_screenshot').toArray()).toEqual([]);
+    vi.setSystemTime(updated + 24 * 60 * 60 * 1000);
+    expect((await restored.fetch(request)).status).toBe(404);
+  });
+
 });
 
 function lastRuntimeCalls(): string[] {

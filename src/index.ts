@@ -8,8 +8,8 @@ import { ServoBrowserSession, type PageReadinessOptions } from './browser-sessio
 import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
 
-const WIDGET_URI = 'ui://servo/browser-v2.html';
-const SEARCH_WIDGET_URI = 'ui://servo/search-v2.html';
+const WIDGET_URI = 'ui://servo/browser-v3.html';
+const SEARCH_WIDGET_URI = 'ui://servo/search-v3.html';
 const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
