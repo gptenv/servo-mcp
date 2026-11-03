@@ -55,8 +55,12 @@ const pageSummaryExpression = `JSON.stringify({url: location.href, title: docume
   traverse(document);
   return contents.join('\\n').slice(0, 20000);
 })()})`;
+// Servo keeps the requested HTTP URL on a network-error document, but its
+// security origin is opaque. Its storage must never replace the site's state.
+const isOpaqueHttpDocument = "globalThis.origin === 'null' && location.origin !== 'null'";
 const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
   const nodePath=(node)=>{const path=[];for(let current=node;current&&current!==document.documentElement;current=current.parentElement){const parent=current.parentElement;if(!parent)return null;path.unshift(Array.prototype.indexOf.call(parent.children,current));}return path;};
+  if(${isOpaqueHttpDocument})return JSON.stringify({opaqueDocument:true});
   const fields=[];
   for(const element of Array.from(document.querySelectorAll('input,textarea,select,[contenteditable="true"]')).slice(0,200)){
     const tag=element.tagName.toLowerCase();
@@ -356,6 +360,7 @@ function base64ToBytes(encoded: string): Uint8Array {
 
 const applyResumeState = (snapshot: ResumeSnapshot): string => `(async()=>{
   const s=${JSON.stringify(snapshot)};
+  if(${isOpaqueHttpDocument})return JSON.stringify({restored:false});
   const restoreStorage=(getStore,entries)=>{const store=getStore();store.clear();for(const [key,value] of entries)store.setItem(key,value);};
   const origin=new URL(s.url).origin;
   const localEntries=s.localStorageByOrigin?.[origin]??s.localStorage;
@@ -874,6 +879,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
     const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB)));
+    if (typeof value === 'object' && value !== null && 'opaqueDocument' in value && value.opaqueDocument === true) return;
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error(`Servo returned invalid browser restore state: ${JSON.stringify(value).slice(0, 512)}`);
     }

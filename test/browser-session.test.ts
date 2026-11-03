@@ -6,8 +6,9 @@
  * workerd or the real engine artifact.
  */
 
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FakeRuntimeOptions } from './helpers/fake-runtime';
+import type { FakeRuntimeOptions, FakeServoRuntime } from './helpers/fake-runtime';
 import { invalidSummary } from './helpers/fake-runtime';
 import { createFakeDurableObjectState, asDoState } from './helpers/fake-do';
 import type { FakeDurableObjectState } from './helpers/fake-do';
@@ -747,6 +748,32 @@ describe('operate lifecycle', () => {
     } finally {
       hostFetch.mockRestore();
     }
+  });
+
+  it('preserves the last usable snapshot when an HTTP URL loads an opaque error document', async () => {
+    const session = await activeSession();
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const previous = sql().table('browser_snapshot')!.rows[0].snapshot_json;
+    const url = 'https://public.example/unreachable';
+    runtime.setInitialUrl('https://other.example/before');
+    const evaluate = runtime.evaluate.bind(runtime);
+    const guards: string[] = [];
+    vi.spyOn(runtime, 'evaluate').mockImplementation(async (script) => {
+      if (script.includes('const nodePath=') || script.includes('const restoreStorage=')) {
+        // Like Servo's network-error page, the URL names the site but the
+        // document has no access to its storage. DOM or storage access throws.
+        const context = { origin: 'null', location: new URL(url) };
+        const result = await runInNewContext(script, context);
+        guards.push(result);
+        return { Ok: { String: result } };
+      }
+      return evaluate(script);
+    });
+
+    await expect(session.navigate(url)).resolves.toMatchObject({ page: { url } });
+    expect(guards.map(value => JSON.parse(value))).toEqual([{ restored: false }, { opaqueDocument: true }]);
+    expect(sql().table('browser_snapshot')!.rows[0].snapshot_json).toBe(previous);
+    await expect(session.getStatus()).resolves.toMatchObject({ resumable: true });
   });
 
   it('keeps plain summaries when no fetch failed for the page URL', async () => {
