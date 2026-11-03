@@ -859,6 +859,21 @@ describe('operate lifecycle', () => {
     expect(calls.filter((call) => call === 'pump')).toHaveLength(0);
   });
 
+  it('reloads the latest inline HTML without sending the synthetic URL to the network', async () => {
+    const session = await activeSession();
+    await session.navigateHtml('<title>First</title>');
+    const html = '<title>Second</title>';
+    await session.navigateHtml(html);
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const navigateHtml = vi.spyOn(runtime, 'navigateHtml');
+    const reload = vi.spyOn(runtime, 'reload');
+    await session.reload({ maxDurationMs: 2000 });
+    expect(navigateHtml).toHaveBeenCalledWith(html, {
+      url: 'https://servo-inline.invalid/', readiness: { maxDurationMs: 2000 },
+    });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   it('reports reload failures', async () => {
     const session = await activeSession({ reloadReturns: false });
     await expect(session.reload()).rejects.toThrow(/could not reload the current page/);
