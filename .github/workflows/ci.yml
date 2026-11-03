@@ -27,22 +27,22 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/servo-puppeteer
+          key: servo-widget-chrome-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Enable headless widget tests
-        shell: bash
         run: |
-          chrome=$(command -v google-chrome || command -v chromium || true)
-          if [[ -z "$chrome" ]]; then
-            chrome=$(node --input-type=module <<'JS'
+          node --input-type=module <<'JS'
           import { install } from '@puppeteer/browsers';
           import { PUPPETEER_REVISIONS } from 'puppeteer-core';
+          import { appendFileSync } from 'node:fs';
+          import { homedir } from 'node:os';
+          import { join } from 'node:path';
           const browser = 'chrome-headless-shell';
-          const binary = await install({ browser, buildId: PUPPETEER_REVISIONS[browser], cacheDir: process.env.RUNNER_TEMP });
-          console.log(binary.executablePath);
+          const binary = await install({ browser, buildId: PUPPETEER_REVISIONS[browser], cacheDir: join(homedir(), '.cache/servo-puppeteer') });
+          appendFileSync(process.env.GITHUB_ENV, `CHROME_PATH=${binary.executablePath}\n`);
           JS
-            )
-          fi
-          test -x "$chrome"
-          echo "CHROME_PATH=$chrome" >> "$GITHUB_ENV"
       - run: npm test
 
   build-worker:

@@ -161,9 +161,10 @@ describe('MCP Apps browser widget host', () => {
     browser = await puppeteer.launch({
       executablePath,
       headless: true,
+      timeout: 45_000,
       args: ['--no-sandbox', '--disable-dev-shm-usage'],
     }) as { newPage: () => Promise<HostPage>; close: () => Promise<void> };
-  });
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
