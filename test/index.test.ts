@@ -154,7 +154,10 @@ describe('MCP Worker routes and server registration', () => {
     expect(searchResource.definition.mimeType).toBe('text/html;profile=mcp-app');
     expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v3.html');
     for (const [name, tool] of harness.tools) {
-      if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser-v3.html');
+      if (name === 'servo_web_search') continue;
+      const expectedUri = name.startsWith('servo_http_') ? 'ui://servo/http-v1.html' : 'ui://servo/browser-v3.html';
+      expect(tool.definition._meta.ui.resourceUri).toBe(expectedUri);
+      expect(tool.definition._meta['openai/outputTemplate']).toBe(expectedUri);
     }
     for (const name of ['servo_web_search', 'servo_navigate', 'servo_evaluate', 'servo_screenshot']) {
       expect(registeredTool(name).definition._meta).toMatchObject({
@@ -171,6 +174,8 @@ describe('MCP Worker routes and server registration', () => {
     expect(searchWidget.contents[0].text).toContain('ui/initialize');
     expect(searchWidget.contents[0].text).toContain('ui/notifications/initialized');
 
+    const httpResource = await harness.resources.get('servo-http-ui')!.handler(new URL('ui://servo/http-v1.html'));
+    expect(httpResource.contents[0].text).toContain('<html lang="en" data-view="http">');
     const browserResource = harness.resources.get('servo-browser-ui')!;
     const widget = await browserResource.handler(new URL('ui://servo/browser-v3.html'));
     expect(browserResource.definition.mimeType).toBe('text/html;profile=mcp-app');

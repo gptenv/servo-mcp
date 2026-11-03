@@ -200,6 +200,30 @@ describe('MCP Apps browser widget host', () => {
 
   const live = executablePath ? it : it.skip;
 
+  live('displays a batch of HTTP results without running the returned HTML or repeating the requests', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+    const result = {
+      isError: true,
+      structuredContent: { kind: 'http', responses: [
+        { actionIndex: 0, ok: true, response: {
+          request: { method: 'GET', url: 'https://example.com/' },
+          response: { status: 200, statusText: 'OK', url: 'https://example.com/', bodyBytes: 42 },
+          body: '<img src=x onerror="alert(1)">',
+        } },
+        { actionIndex: 1, ok: false, error: 'Blocked private address' },
+      ] },
+    };
+    await page.evaluate((result) => (window as any).__deliver({}, result), result);
+    await frame.waitForFunction(() => document.documentElement.dataset.view === 'http');
+    const output = await frame.evaluate(() => document.querySelector<HTMLElement>('#http-responses')!.innerText);
+    expect(output).toContain('GET 200 OK');
+    expect(output).toContain('<img src=x onerror="alert(1)">');
+    expect(output).toContain('Blocked private address');
+    expect(await frame.evaluate(() => document.querySelector('#http-responses img') === null)).toBe(true);
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([]);
+    await page.close();
+  });
+
   live('shows the hosted screenshot when data URLs are blocked and fills the URL from tool input', async () => {
     const csp = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${origin}`;
     const { page, frame } = await openWidget(csp);

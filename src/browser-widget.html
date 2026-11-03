@@ -1,11 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-view="browser">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Servo browser</title>
 <style>
   :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
   body { margin: 0; padding: 16px; }
+  html[data-view="http"] #browser-view, html[data-view="browser"] #http-view { display: none; }
+  #http-responses { overflow-wrap: anywhere; }
   form { display: grid; gap: 10px; }
   label { display: grid; gap: 4px; }
   input, textarea, button { font: inherit; padding: 8px; }
@@ -17,7 +19,7 @@
   #preview:not([src]) { display: none; }
   pre { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
 </style>
-<main>
+<main id="browser-view">
   <h1>Servo browser</h1>
   <form id="browser-form">
     <label>Page URL <input id="url" type="url" placeholder="https://example.com" required></label>
@@ -28,6 +30,10 @@
   <p id="status" role="status"></p>
   <img id="preview" alt="Screenshot rendered by Servo">
   <pre id="details"></pre>
+</main>
+<main id="http-view">
+  <h1>HTTP response</h1>
+  <div id="http-responses" aria-live="polite">Waiting for the response…</div>
 </main>
 <script>
   const pending = new Map();
@@ -186,8 +192,54 @@
       reportSize();
     }
   }
+  function renderHttp(responses) {
+    const rows = document.querySelector('#http-responses');
+    rows.replaceChildren();
+    for (const entry of responses) {
+      const section = document.createElement('section');
+      const heading = document.createElement('h2');
+      const body = document.createElement('pre');
+      const payload = entry.response;
+      if (entry.ok && payload?.response) {
+        const { request, response } = payload;
+        heading.textContent = [request.method, response.status, response.statusText].filter(Boolean).join(' ');
+        const url = document.createElement('p');
+        url.textContent = response.url || request.url;
+        section.append(heading, url);
+        const summary = payload.results?.[0];
+        if (summary?.title) {
+          const title = document.createElement('strong');
+          title.textContent = summary.title;
+          section.append(title);
+        }
+        const preview = summary?.content || payload.body;
+        body.textContent = preview ? preview.slice(0, 20000) : response.bodyBytes
+          ? 'Binary response (' + response.bodyBytes + ' bytes)' : 'No response body.';
+        if (response.truncated || (payload.body?.length > 20000 && preview)) body.textContent += '\n… (preview truncated)';
+      } else {
+        heading.textContent = 'Request ' + (entry.actionIndex + 1) + ' failed';
+        body.textContent = entry.error || 'No HTTP response was received.';
+        section.append(heading);
+      }
+      section.append(body);
+      rows.append(section);
+    }
+    document.documentElement.dataset.view = 'http';
+    reportSize();
+  }
   function applyResult(result, autoShot = true) {
     if (!result) return false;
+    const data = result.structuredContent;
+    if (Array.isArray(data?.responses) && (data.kind === 'http' ||
+        data.responses.some((entry) => entry?.response?.request && entry.response.response))) {
+      renderHttp(data.responses);
+      return true;
+    }
+    if (document.documentElement.dataset.view === 'http' && result.isError) {
+      document.querySelector('#http-responses').textContent = result.content?.[0]?.text || 'The HTTP request failed.';
+      reportSize();
+      return false;
+    }
     const entry = firstResponse(result);
     if (entry?.ok === false || (!entry && result.isError)) {
       statusField.textContent = resultError(result, 'Servo action failed.');
@@ -211,8 +263,7 @@
     reportSize();
     return true;
   }
-  function applyOpenAi() {
-    const openai = window.openai;
+  function applyOpenAi(openai = window.openai) {
     if (!openai) return;
     if (openai.toolInput) applyInput({ arguments: openai.toolInput });
     const envelope = openai.toolResponseMetadata?.mcp_tool_result || openai.toolResponseMetadata?.call_tool_result;
@@ -252,7 +303,7 @@
     }
     handle(message);
   });
-  window.addEventListener('openai:set_globals', () => { if (accepting) applyOpenAi(); });
+  window.addEventListener('openai:set_globals', (event) => applyOpenAi(event.detail?.globals || window.openai));
   function finishConnect(result) {
     bridgeReady = true;
     accepting = true;
@@ -343,6 +394,7 @@
   document.querySelector('#browser-form').addEventListener('submit', loadPage);
   loadButton.addEventListener('click', loadPage);
   new ResizeObserver(() => reportSize()).observe(document.documentElement);
+  applyOpenAi();
   connect();
 </script>
 </html>

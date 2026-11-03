@@ -9,6 +9,7 @@ import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser-v3.html';
+const HTTP_WIDGET_URI = 'ui://servo/http-v1.html';
 const SEARCH_WIDGET_URI = 'ui://servo/search-v3.html';
 const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
@@ -184,15 +185,20 @@ function createServer(env: Env, publicOrigin: string) {
   };
 
   const browserWidgetMeta = widgetResourceMeta(publicOrigin);
-  server.registerResource('servo-browser-ui', WIDGET_URI, {
-    title: 'Servo browser controls',
-    description: 'Load a public page, inspect it, and view its rendered screenshot. The first navigation creates a tab automatically.',
-    mimeType: 'text/html;profile=mcp-app',
-    _meta: browserWidgetMeta,
-  }, async (uri) => ({ contents: [{ uri: uri.href,
-    mimeType: 'text/html;profile=mcp-app', text: widgetHtml,
-    _meta: browserWidgetMeta,
-  }] }));
+  // Older tool descriptors may still be cached by the host.
+  for (const [name, uri, title, description] of [
+    ['servo-browser-ui', WIDGET_URI, 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-browser-ui-v2', 'ui://servo/browser-v2.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-browser-ui-original', 'ui://servo/browser.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-http-ui', HTTP_WIDGET_URI, 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
+  ]) {
+    server.registerResource(name, uri, {
+      title, description, mimeType: 'text/html;profile=mcp-app', _meta: browserWidgetMeta,
+    }, async (requested) => ({ contents: [{ uri: requested.href,
+      mimeType: 'text/html;profile=mcp-app', text: uri === HTTP_WIDGET_URI ? widgetHtml.replace('data-view="browser"', 'data-view="http"') : widgetHtml,
+      _meta: browserWidgetMeta,
+    }] }));
+  }
 
   server.registerResource('servo-web-search-ui', SEARCH_WIDGET_URI, {
     title: 'Servo web search',
@@ -338,7 +344,9 @@ function createServer(env: Env, publicOrigin: string) {
     runSessions(input, (browser, group) => (group.readiness ? browser.inspect(group.readiness) : browser.inspect()).then((page) => withWebResult({ page }))),
   ));
 
+  const httpUiMeta = { ui: { resourceUri: HTTP_WIDGET_URI }, 'openai/outputTemplate': HTTP_WIDGET_URI };
   const runHttpActions = async <T>(actions: T[], operation: (action: T) => Promise<object>) => ({
+    kind: 'http',
     responses: await Promise.all(actions.map(async (action, actionIndex) => {
       try { return { actionIndex, ok: true, response: await operation(action) }; }
       catch (error) { return { actionIndex, ok: false, ...sessionError(error) }; }
@@ -349,7 +357,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo HTTP request',
     description: 'Send an array of public HTTP(S) requests. Each actions entry accepts any valid Fetch API method (including custom extension methods), optional custom request headers and UTF-8 body, redirect policy, timeout, and response-size limit. Returns one response object per request with status, response headers, body (or base64 for binary), and citation-style page results. CONNECT, TRACE, and TRACK are forbidden by the Fetch API.',
     inputSchema: z.object({ actions: z.array(httpRequestSchema.strict()).min(1).max(20) }).strict(),
-    _meta: browserUiMeta,
+    _meta: httpUiMeta,
   }, async ({ actions }) => safely(() => runHttpActions(actions, requestHttp)));
 
   for (const method of HTTP_METHODS) {
@@ -358,7 +366,7 @@ function createServer(env: Env, publicOrigin: string) {
       title: `Servo HTTP ${method}`,
       description: `Send an array of ${method} requests to public HTTP(S) URLs with optional custom request headers${['GET', 'HEAD'].includes(method) ? '' : ' and UTF-8 body'}. Returns one response object per request with status, headers, bounded body data, and citation-style page results.`,
       inputSchema: z.object({ actions: z.array(httpVerbRequestSchema.strict()).min(1).max(20) }).strict(),
-      _meta: browserUiMeta,
+      _meta: httpUiMeta,
     }, async ({ actions }) => safely(() => runHttpActions(actions, (action) => requestHttp({ ...action, method }))));
   }
 
