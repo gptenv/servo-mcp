@@ -156,6 +156,11 @@ describe('MCP Worker routes and server registration', () => {
     for (const [name, tool] of harness.tools) {
       if (name !== 'servo_web_search') expect(tool.definition._meta?.ui?.resourceUri).toBe('ui://servo/browser-v3.html');
     }
+    for (const name of ['servo_web_search', 'servo_navigate', 'servo_evaluate', 'servo_screenshot']) {
+      expect(registeredTool(name).definition._meta).toMatchObject({
+        ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true,
+      });
+    }
     expect(registeredTool('servo_app_open').definition._meta?.['openai/ui']?.entrypoints?.[0]?.type).toBe('global');
     expect(registeredTool('servo_app_open').definition.inputSchema.parse({})).toEqual({});
     expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']).toBeUndefined();

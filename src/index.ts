@@ -208,12 +208,18 @@ function createServer(env: Env, publicOrigin: string) {
     ui: { resourceUri: WIDGET_URI },
     'openai/outputTemplate': WIDGET_URI,
   };
+  const browserControlMeta = {
+    ...browserUiMeta,
+    ui: { ...browserUiMeta.ui, visibility: ['model', 'app'] },
+    'openai/widgetAccessible': true,
+  };
   const browserAppUiMeta = {
     ...browserUiMeta,
     'openai/ui': { entrypoints: [{ type: 'global' }] },
   };
   const searchUiMeta = {
-    ui: { resourceUri: SEARCH_WIDGET_URI },
+    ui: { resourceUri: SEARCH_WIDGET_URI, visibility: ['model', 'app'] },
+    'openai/widgetAccessible': true,
     'openai/outputTemplate': SEARCH_WIDGET_URI,
   };
 
@@ -297,7 +303,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo navigate',
     description: 'Load and wait for a ready public URL or inline HTML in multiple tabs. Omit sessionID or use a falsy value to create a new tab as part of navigation; include it to reuse or restore an existing tab. Returns ordered action responses with the final page title, URL, visible text, and a web-search-style results entry with title, URL, snippet, and content. The browser app receives a viewport screenshot of each loaded page. Each actions entry has its own load budget; private/local network addresses are blocked.',
     inputSchema: navigateSchema,
-    _meta: browserUiMeta,
+    _meta: browserControlMeta,
   }, async (input) => safely(async () => {
     const { responses } = await runSessions(input, async (browser, group, created) => {
       // Initialization already loads new tabs; do not execute navigation twice.
@@ -360,7 +366,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo evaluate',
     description: 'Evaluate a JavaScript expression in each selected page in parallel. Every entry carries its own script and budget. If the script returns a promise, it is awaited within the budget. Each action returns a response with a WebDriver-style JSON clone, such as {"Ok":{"String":"…"}} or {"Err":…}; return JSON.stringify(value) for complex data. Scripts can modify pages or cause external effects.',
     inputSchema: evaluateSchema,
-    _meta: browserUiMeta
+    _meta: browserControlMeta
   }, async (input) => safely(async () => runSessions(input, (browser, group) => group.readiness ? browser.evaluate(group.script, group.readiness) : browser.evaluate(group.script))));
 
   server.registerTool('servo_click', {
@@ -416,7 +422,7 @@ function createServer(env: Env, publicOrigin: string) {
     title: 'Servo screenshot',
     description: 'Capture ready viewport or full-page screenshots with optional per-action DOM-readiness overrides and an actions array of objects, each carrying an optional sessionID. Returns an ordered responses array; imageIndex maps each response to its screenshot image block.',
     inputSchema: screenshotSchema,
-    _meta: browserUiMeta,
+    _meta: browserControlMeta,
   }, async (input) => safely(async () => {
     const images: Uint8Array[] = [];
     const widgetScreenshots: Array<WidgetScreenshot | undefined> = [];

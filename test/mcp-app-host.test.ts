@@ -91,6 +91,7 @@ function hostPage(): string {
     if (message.method === 'ui/notifications/initialized') { window.__initialized = true; return; }
     if (message.method === 'tools/call' && message.id !== undefined) {
       window.__calls.push(message.params);
+      if (window.__dropToolReply) return;
       if (window.__missingToolMethod) { frame.contentWindow.postMessage({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }, '*'); return; }
       const result = window.__reply ? window.__reply(message.params) : { isError: true, content: [{ type: 'text', text: 'No harness reply.' }] };
       frame.contentWindow.postMessage({ jsonrpc: '2.0', id: message.id, result }, '*');
@@ -316,6 +317,26 @@ describe('MCP Apps browser widget host', () => {
     await frame.type('#query', '  servo  ');
     await frame.click('#search');
     await frame.waitForFunction(() => document.querySelector('#results a')?.textContent === 'servo_web_search: servo');
+    await page.close();
+  });
+
+  live('recovers from an unanswered search without leaving its button disabled', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'", 'search');
+    await page.evaluate(() => { (window as unknown as { __dropToolReply: boolean }).__dropToolReply = true; });
+    await frame.evaluate(() => {
+      const clock: { setTimeout(callback: TimerHandler, delay?: number, ...args: unknown[]): number } = window;
+      const timer = clock.setTimeout.bind(window);
+      // Advance only this transport deadline. Keep the real message bridge and event loop.
+      clock.setTimeout = (callback, delay, ...args) => timer(callback, delay === 30_000 ? 1 : delay, ...args);
+      (window as unknown as { openai: unknown }).openai = {
+        async callTool() { return { structuredContent: { results: [] } }; },
+      };
+    });
+    await frame.type('#query', 'servo');
+    await frame.click('#search');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'No results found.');
+    expect(await frame.evaluate(() => document.querySelector<HTMLButtonElement>('#search')?.disabled)).toBe(false);
+    expect(await page.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls.length)).toBe(1);
     await page.close();
   });
 

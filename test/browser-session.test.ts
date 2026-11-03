@@ -1142,6 +1142,18 @@ describe('widget screenshot bytes', () => {
     expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([]);
   });
 
+  it('rolls back a partially stored PNG without invalidating an earlier link', async () => {
+    const session = await newSession();
+    await session.initialize(initOptions());
+    const existing = await session.publishWidgetScreenshot(new Uint8Array([42]));
+    sql().exec(`CREATE TRIGGER reject_second_chunk BEFORE INSERT ON browser_widget_screenshot_chunk
+      WHEN NEW.chunk_index = 1 BEGIN SELECT RAISE(ABORT, 'chunk write failed'); END`);
+    await expect(session.publishWidgetScreenshot(new Uint8Array(600_000))).rejects.toThrow('chunk write failed');
+    expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([{ token: existing.token }]);
+    const response = await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${existing.token}`));
+    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([42]);
+  });
+
   it('migrates a published singleton without changing its URL or extending its lifetime', async () => {
     await newSession();
     const token = crypto.randomUUID();
