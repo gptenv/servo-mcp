@@ -170,7 +170,7 @@ resource convention. The browser widget completes the `ui/initialize` handshake
 before it accepts tool input or calls tools. Viewport screenshots are stored on
 the session and returned to the widget in tool-result `_meta` (a Worker URL
 plus inline PNG bytes when the capture is at most 96 KiB). Each tab retains its eight
-most recent screenshots for up to 24 hours. Closing the tab revokes their URLs.
+most recent screenshots for up to 24 hours. Closing the browser session revokes its screenshot URLs.
 Larger captures are stored as 512 KiB chunks. The browser UI
 resource allows that Worker origin in `ui.csp.resourceDomains` and
 `openai/widgetCSP.resource_domains`, and the widget falls back from a `data:`
