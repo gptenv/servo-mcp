@@ -724,51 +724,29 @@ describe('operate lifecycle', () => {
     return session;
   }
 
-  it('navigates public pages and annotates host fetch failures', async () => {
-    let firstPumpResolve!: () => void;
-    const pumpGate = new Promise<void>((resolve) => { firstPumpResolve = resolve; });
+  it.each([
+    { rejection: new TypeError('fetch failed'), message: 'fetch failed' },
+    { rejection: 'plain rejection', message: 'plain rejection' },
+  ])('annotates the navigated page when its host fetch rejects with $message', async ({ rejection, message }) => {
+    const url = 'https://public.example/page';
     const session = await activeSession({
-      summary: { url: 'https://public.example/page' },
-      pumpFactory: () => (pumpCalls++ === 0
-        ? pumpGate.then(() => ({ settled: true }))
-        : Promise.resolve({ settled: true })),
+      summary: () => ({ url: pumpCalls === 0 ? 'https://public.example/before' : url }),
+      pumpFactory: async () => {
+        if (pumpCalls++ === 0) {
+          const fetchPage = runtimeConfigs.at(-1)!.fetchImpl as typeof fetch;
+          await expect(fetchPage(url)).rejects.toBe(rejection);
+        }
+        return { settled: true };
+      },
     });
-    // While the navigate operation is mid-pump, the page's subresource fetch
-    // fails at the host level; the failure must surface as loadError.
-    const navigatePromise = session.navigate('https://public.example/page');
-    await Promise.resolve();
-    const config = runtimeConfigs[runtimeConfigs.length - 1];
-    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/page')
-      .then(() => undefined, () => undefined);
-    firstPumpResolve();
-    const result = await navigatePromise;
-    expect(result.action).toBe('navigate');
-    expect(result.page.loadError).toContain('The page could not be loaded: fetch failed');
-  });
-
-  it('records non-Error host fetch failures as strings', async () => {
-    let firstPumpResolve!: () => void;
-    const pumpGate = new Promise<void>((resolve) => { firstPumpResolve = resolve; });
-    const session = await activeSession({
-      summary: () => pumpCalls === 0
-        ? { url: 'https://public.example/x' }
-        : { url: 'https://public.example/page' },
-      pumpFactory: () => (pumpCalls++ === 0
-        ? pumpGate.then(() => ({ settled: true }))
-        : Promise.resolve({ settled: true })),
-    });
-    // While the navigate operation is mid-pump, a subresource fetch rejects
-    // with a non-Error value; the string form must surface as loadError.
-    const navigatePromise = session.navigate('https://public.example/page');
-    await Promise.resolve();
-    const config = runtimeConfigs[runtimeConfigs.length - 1];
-    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject('plain rejection')));
-    await (config.fetchImpl as (input: string) => Promise<Response>)('https://public.example/page')
-      .catch(() => undefined);
-    vi.unstubAllGlobals();
-    firstPumpResolve();
-    const result = await navigatePromise;
-    expect(result.page.loadError).toBe('The page could not be loaded: plain rejection');
+    const hostFetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
+    try {
+      const result = await session.navigate(url);
+      expect(result.action).toBe('navigate');
+      expect(result.page.loadError).toBe(`The page could not be loaded: ${message}`);
+    } finally {
+      hostFetch.mockRestore();
+    }
   });
 
   it('keeps plain summaries when no fetch failed for the page URL', async () => {
