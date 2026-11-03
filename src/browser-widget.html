@@ -11,8 +11,10 @@
   input, textarea, button { font: inherit; padding: 8px; }
   textarea { min-height: 90px; resize: vertical; }
   button { justify-self: start; cursor: pointer; }
+  button:disabled { cursor: progress; }
   #status { min-height: 1.5em; }
-  #preview { display: block; max-width: 100%; border: 1px solid #8886; }
+  #preview[src] { display: block; max-width: 100%; height: auto; border: 1px solid #8886; }
+  #preview:not([src]) { display: none; }
   pre { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
 </style>
 <main>
@@ -20,7 +22,7 @@
   <form id="browser-form">
     <label>Page URL <input id="url" type="url" placeholder="https://example.com" required></label>
     <label>Optional page script <textarea id="script" placeholder="document.title"></textarea></label>
-    <button>Load and render</button>
+    <button id="load" type="submit">Load and render</button>
   </form>
   <p>Session: <code id="session-id">none</code></p>
   <p id="status" role="status"></p>
@@ -29,77 +31,309 @@
 </main>
 <script>
   const pending = new Map();
+  const buffered = [];
   let nextId = 1;
   let sessionId = null;
+  let accepting = false;
+  let bridgeReady = false;
+  let suppressAutoShot = 0;
+  let refreshing = false;
+  let lastWidth = 0;
+  let lastHeight = 0;
+  const urlField = document.querySelector('#url');
+  const scriptField = document.querySelector('#script');
+  const statusField = document.querySelector('#status');
+  const sessionField = document.querySelector('#session-id');
+  const preview = document.querySelector('#preview');
+  const details = document.querySelector('#details');
+  const loadButton = document.querySelector('#load');
+  let readyResolve = () => {};
+  const ready = new Promise((resolve) => { readyResolve = resolve; });
+
+  urlField.addEventListener('input', () => { urlField.dataset.userEdited = '1'; });
+  scriptField.addEventListener('input', () => { scriptField.dataset.userEdited = '1'; });
+
+  function post(message) {
+    if (!window.parent || window.parent === window) return;
+    window.parent.postMessage(message, '*');
+  }
   function call(method, params) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+      post({ jsonrpc: '2.0', id, method, params });
     });
   }
-  window.addEventListener('message', event => {
-    if (event.source !== window.parent) return;
+  function reportSize() {
+    if (!bridgeReady) return;
+    const width = Math.ceil(document.documentElement.scrollWidth);
+    const height = Math.ceil(document.documentElement.scrollHeight);
+    if (width === lastWidth && height === lastHeight) return;
+    lastWidth = width;
+    lastHeight = height;
+    post({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { width, height } });
+    const notify = window.openai && window.openai.notifyIntrinsicHeight;
+    if (typeof notify === 'function') {
+      try { notify(height); } catch { /* Host-specific height hints are optional. */ }
+    }
+  }
+  function httpUrl(value) {
+    try {
+      const url = new URL(value);
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+    } catch { return ''; }
+  }
+  function actionList(input) {
+    if (Array.isArray(input?.actions) && input.actions.length) return input.actions.filter((entry) => entry && typeof entry === 'object');
+    return input && typeof input === 'object' ? [input] : [];
+  }
+  function applyInput(params) {
+    const input = params?.arguments ?? params ?? {};
+    const action = actionList(input)[0];
+    if (!action) return;
+    const url = httpUrl(action.url);
+    if (url && urlField.dataset.userEdited !== '1') urlField.value = url;
+    if (typeof action.script === 'string' && scriptField.dataset.userEdited !== '1') scriptField.value = action.script;
+    if (typeof action.sessionID === 'string' && action.sessionID) {
+      sessionId = action.sessionID;
+      sessionField.textContent = sessionId;
+    }
+  }
+  function screenshotList(result) {
+    const found = [];
+    const pushAll = (value) => { if (Array.isArray(value)) found.push(...value.filter((shot) => shot && typeof shot === 'object')); };
+    pushAll(result?._meta?.ui?.screenshots);
+    pushAll(result?._meta?.mcp_tool_result?._meta?.ui?.screenshots);
+    pushAll(result?._meta?.call_tool_result?._meta?.ui?.screenshots);
+    const parts = Array.isArray(result?.content) ? result.content : [];
+    parts.forEach((part, index) => {
+      if (part?.type === 'image' && typeof part.data === 'string' && part.data && /^image\/(png|jpeg|webp|gif)$/.test(part.mimeType || '')) {
+        found.push({ mimeType: part.mimeType, data: part.data, imageIndex: index });
+      }
+    });
+    return found;
+  }
+  function showScreenshot(shot) {
+    const mimeType = shot.mimeType || 'image/png';
+    const sources = [];
+    if (typeof shot.data === 'string' && shot.data) sources.push('data:' + mimeType + ';base64,' + shot.data);
+    if (typeof shot.url === 'string' && shot.url) sources.push(shot.url);
+    if (!sources.length) return false;
+    let index = 0;
+    preview.alt = shot.sessionID ? 'Screenshot of session ' + shot.sessionID : 'Screenshot rendered by Servo';
+    preview.dataset.state = 'loading';
+    preview.onload = () => { preview.dataset.state = 'loaded'; reportSize(); };
+    preview.onerror = () => {
+      index += 1;
+      if (index < sources.length) { preview.src = sources[index]; return; }
+      preview.removeAttribute('src');
+      preview.dataset.state = 'error';
+      statusField.textContent = 'Screenshot could not be displayed.';
+    };
+    preview.src = sources[0];
+    return true;
+  }
+  function preferredShot(shots) {
+    if (!shots.length) return undefined;
+    return shots.find((shot) => shot.sessionID === sessionId) || shots[0];
+  }
+  function pageOf(entry) {
+    const page = entry?.response?.page;
+    return page && typeof page === 'object' ? page : null;
+  }
+  function describe(result) {
+    try {
+      const clone = JSON.parse(JSON.stringify(result ?? null));
+      const trim = (shot) => {
+        if (!shot || typeof shot !== 'object') return;
+        if (typeof shot.data === 'string') shot.data = '…' + shot.data.length + ' base64 chars';
+        if (typeof shot.url === 'string') shot.url = 'hosted screenshot';
+      };
+      for (const shot of clone?._meta?.ui?.screenshots ?? []) trim(shot);
+      for (const shot of clone?._meta?.mcp_tool_result?._meta?.ui?.screenshots ?? []) trim(shot);
+      for (const shot of clone?._meta?.call_tool_result?._meta?.ui?.screenshots ?? []) trim(shot);
+      if (Array.isArray(clone?.content)) for (const part of clone.content) if (part?.type === 'image' && typeof part.data === 'string') part.data = '…' + part.data.length + ' base64 chars';
+      return JSON.stringify(clone, null, 2);
+    } catch { return String(result); }
+  }
+  function firstResponse(result) {
+    const responses = result?.structuredContent?.responses;
+    if (!Array.isArray(responses) || !responses.length) return null;
+    return responses.find((entry) => entry?.sessionID === sessionId) || responses[0];
+  }
+  async function refreshScreenshot(id) {
+    if (!id || refreshing) return;
+    refreshing = true;
+    statusField.textContent = 'Capturing screenshot…';
+    try {
+      const rendered = await callTool('servo_screenshot', { actions: [{ sessionID: id }] });
+      applyResult(rendered, false);
+    } catch (error) {
+      statusField.textContent = String(error?.message ?? error);
+    } finally {
+      refreshing = false;
+      reportSize();
+    }
+  }
+  function applyResult(result, autoShot = true) {
+    if (!result) return false;
+    const entry = firstResponse(result);
+    if (entry?.sessionID) {
+      sessionId = entry.sessionID;
+      sessionField.textContent = sessionId;
+    }
+    if (entry?.ok === false) {
+      statusField.textContent = entry.error || 'Servo action failed.';
+      details.textContent = describe(result);
+      reportSize();
+      return false;
+    }
+    const page = entry ? pageOf(entry) : result.structuredContent;
+    const pageUrl = httpUrl(page?.url);
+    if (pageUrl && urlField.dataset.userEdited !== '1') urlField.value = pageUrl;
+    const shots = screenshotList(result);
+    const shown = showScreenshot(preferredShot(shots) || {});
+    if (autoShot && !shown && entry?.ok && entry.sessionID && page && suppressAutoShot === 0) refreshScreenshot(entry.sessionID);
+    if (page) statusField.textContent = page.title || pageUrl || statusField.textContent || 'Rendered';
+    else if (shown && !statusField.textContent) statusField.textContent = 'Rendered';
+    details.textContent = describe(result);
+    reportSize();
+    return entry ? entry.ok !== false : true;
+  }
+  function applyOpenAi() {
+    const openai = window.openai;
+    if (!openai) return;
+    if (openai.toolInput) applyInput({ arguments: openai.toolInput });
+    const envelope = openai.toolResponseMetadata?.mcp_tool_result || openai.toolResponseMetadata?.call_tool_result;
+    if (!openai.toolOutput && !envelope && !openai.toolResponseMetadata) return;
+    applyResult({
+      structuredContent: openai.toolOutput || envelope?.structuredContent,
+      content: envelope?.content || [],
+      _meta: envelope?._meta || openai.toolResponseMetadata,
+      isError: envelope?.isError,
+    });
+  }
+  function handle(message) {
+    if (message.method === 'ui/notifications/tool-input' || message.method === 'ui/notifications/tool-input-partial') applyInput(message.params);
+    if (message.method === 'ui/notifications/tool-result') applyResult(message.params);
+    if (message.method === 'ui/notifications/tool-cancelled') statusField.textContent = message.params?.reason || 'The tool call was cancelled.';
+    if (message.method === 'ui/notifications/host-context-changed' && message.params?.theme) document.documentElement.style.colorScheme = message.params.theme;
+  }
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent || event.source === window) return;
     const message = event.data;
     if (!message || message.jsonrpc !== '2.0') return;
     if (message.id !== undefined && pending.has(message.id)) {
       const request = pending.get(message.id);
       pending.delete(message.id);
-      message.error ? request.reject(message.error) : request.resolve(message.result);
+      if (message.error) request.reject(Object.assign(new Error(message.error.message || 'Host request failed.'), { code: message.error.code }));
+      else request.resolve(message.result);
       return;
     }
-    if (message.method === 'ui/notifications/tool-result') {
-      const result = message.params?.structuredContent;
-      const first = result?.responses?.[0];
-      const pageResult = first?.response?.page ?? first?.response ?? result;
-      if (first?.ok === false) {
-        document.querySelector('#status').textContent = first.error || 'Servo action failed.';
-        document.querySelector('#details').textContent = JSON.stringify(first, null, 2);
-      } else {
-        render(pageResult, message.params?.content ?? []);
-      }
+    if (message.id !== undefined && (message.method === 'ping' || message.method === 'ui/resource-teardown')) {
+      post({ jsonrpc: '2.0', id: message.id, result: {} });
+      return;
     }
-    if (message.method === 'ui/notifications/tool-input') {
-      const input = message.params?.arguments ?? message.params;
-      if (input?.url) document.querySelector('#url').value = input.url;
+    if (!message.method) return;
+    if (!accepting && String(message.method).startsWith('ui/notifications/')) {
+      buffered.push(message);
+      return;
     }
+    handle(message);
   });
-  function render(result, content = []) {
-    if (!result) return;
-    document.querySelector('#status').textContent = result.title || result.url || 'Rendered';
-    document.querySelector('#details').textContent = JSON.stringify(result, null, 2);
-    const image = content.find(part => part.type === 'image' && part.mimeType === 'image/png');
-    if (image) document.querySelector('#preview').src = `data:image/png;base64,${image.data}`;
+  window.addEventListener('openai:set_globals', () => { if (accepting) applyOpenAi(); });
+  function finishConnect(result) {
+    bridgeReady = true;
+    accepting = true;
+    if (result?.hostContext?.theme) document.documentElement.style.colorScheme = result.hostContext.theme;
+    for (const message of buffered.splice(0)) handle(message);
+    applyOpenAi();
+    readyResolve();
+    reportSize();
   }
-  document.querySelector('#browser-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const status = document.querySelector('#status');
-    status.textContent = 'Loading page…';
+  async function connect() {
+    let timer;
     try {
-      const created = await call('tools/call', { name: 'servo_navigate', arguments: {
-        actions: [{ sessionID: sessionId, url: document.querySelector('#url').value }],
-      } });
-      if (created.isError) throw new Error(created.content?.[0]?.text || 'Servo could not load the page.');
-      const createdSession = created.structuredContent?.responses?.[0];
-      if (!createdSession?.ok) throw new Error(createdSession?.error || 'Servo could not load the page.');
-      sessionId = createdSession.sessionID;
-      document.querySelector('#session-id').textContent = sessionId || 'unavailable';
-      const script = document.querySelector('#script').value;
-      if (script) {
-        const evaluated = await call('tools/call', { name: 'servo_evaluate', arguments: { actions: [{ sessionID: sessionId, script }] } });
-        if (evaluated.isError) throw new Error(evaluated.content?.[0]?.text || 'Servo evaluation failed.');
-        const evaluationResult = evaluated.structuredContent?.responses?.[0];
-        if (!evaluationResult?.ok) throw new Error(evaluationResult?.error || 'Servo evaluation failed.');
-      }
-      const rendered = await call('tools/call', { name: 'servo_screenshot', arguments: { actions: [{ sessionID: sessionId }] } });
-      if (rendered.isError) throw new Error(rendered.content?.[0]?.text || 'Servo could not render the page.');
-      const screenshotResult = rendered.structuredContent?.responses?.[0];
-      if (!screenshotResult?.ok) throw new Error(screenshotResult?.error || 'Servo could not render the page.');
-      render(screenshotResult.response, rendered.content);
-      status.textContent = 'Session ready';
-    } catch (error) {
-      status.textContent = String(error?.message ?? error);
+      const result = await Promise.race([
+        call('ui/initialize', {
+          appInfo: { name: 'Servo browser', version: '0.5.0' },
+          appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
+          protocolVersion: '2026-01-26',
+        }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Host initialize timed out.')), 8000); }),
+      ]);
+      clearTimeout(timer);
+      post({ jsonrpc: '2.0', method: 'ui/notifications/initialized' });
+      finishConnect(result);
+    } catch {
+      clearTimeout(timer);
+      finishConnect(null);
     }
-  });
+  }
+  async function callTool(name, args) {
+    await ready;
+    suppressAutoShot += 1;
+    try {
+      try {
+        return await call('tools/call', { name, arguments: args });
+      } catch (error) {
+        const fallback = window.openai && window.openai.callTool;
+        if (typeof fallback !== 'function' || (error?.code !== -32601 && !/method not found/i.test(String(error?.message || '')))) throw error;
+        return await fallback(name, args);
+      }
+    } finally {
+      suppressAutoShot -= 1;
+    }
+  }
+  function resultError(result, fallback) {
+    const entry = firstResponse(result);
+    return entry?.error || result?.content?.find?.((part) => part?.type === 'text')?.text || fallback;
+  }
+  let loading = false;
+  async function loadPage(event) {
+    event.preventDefault();
+    if (loading) return;
+    if (!httpUrl(urlField.value)) {
+      statusField.textContent = 'Enter a public http(s) URL.';
+      return;
+    }
+    loading = true;
+    loadButton.disabled = true;
+    statusField.textContent = 'Loading page…';
+    try {
+      await ready;
+      const navigated = await callTool('servo_navigate', {
+        actions: [{ ...(sessionId ? { sessionID: sessionId } : {}), url: urlField.value }],
+      });
+      if (!applyResult(navigated, false) || firstResponse(navigated)?.ok === false) throw new Error(resultError(navigated, 'Servo could not load the page.'));
+      const script = scriptField.value.trim();
+      let needsShot = !screenshotList(navigated).length;
+      if (script) {
+        if (!sessionId) throw new Error('Navigation did not return a session.');
+        statusField.textContent = 'Running page script…';
+        const evaluated = await callTool('servo_evaluate', { actions: [{ sessionID: sessionId, script }] });
+        if (!applyResult(evaluated, false) || firstResponse(evaluated)?.ok === false) throw new Error(resultError(evaluated, 'Servo evaluation failed.'));
+        needsShot = true;
+      }
+      if (needsShot) {
+        if (!sessionId) throw new Error('Navigation did not return a session.');
+        statusField.textContent = 'Capturing screenshot…';
+        const rendered = await callTool('servo_screenshot', { actions: [{ sessionID: sessionId }] });
+        if (!applyResult(rendered, false) || firstResponse(rendered)?.ok === false || !screenshotList(rendered).length) {
+          throw new Error(resultError(rendered, 'Servo could not render the page.'));
+        }
+      }
+    } catch (error) {
+      statusField.textContent = String(error?.message ?? error);
+    } finally {
+      loading = false;
+      loadButton.disabled = false;
+      reportSize();
+    }
+  }
+  document.querySelector('#browser-form').addEventListener('submit', loadPage);
+  loadButton.addEventListener('click', loadPage);
+  new ResizeObserver(() => reportSize()).observe(document.documentElement);
+  connect();
 </script>
 </html>
