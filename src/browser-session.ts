@@ -55,8 +55,12 @@ const pageSummaryExpression = `JSON.stringify({url: location.href, title: docume
   traverse(document);
   return contents.join('\\n').slice(0, 20000);
 })()})`;
+// Servo keeps the requested HTTP URL on a network-error document, but its
+// security origin is opaque. Its storage must never replace the site's state.
+const isOpaqueHttpDocument = "globalThis.origin === 'null' && location.origin !== 'null'";
 const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
   const nodePath=(node)=>{const path=[];for(let current=node;current&&current!==document.documentElement;current=current.parentElement){const parent=current.parentElement;if(!parent)return null;path.unshift(Array.prototype.indexOf.call(parent.children,current));}return path;};
+  if(${isOpaqueHttpDocument})return JSON.stringify({opaqueDocument:true});
   const fields=[];
   for(const element of Array.from(document.querySelectorAll('input,textarea,select,[contenteditable="true"]')).slice(0,200)){
     const tag=element.tagName.toLowerCase();
@@ -356,6 +360,7 @@ function base64ToBytes(encoded: string): Uint8Array {
 
 const applyResumeState = (snapshot: ResumeSnapshot): string => `(async()=>{
   const s=${JSON.stringify(snapshot)};
+  if(${isOpaqueHttpDocument})return JSON.stringify({restored:false});
   const restoreStorage=(getStore,entries)=>{const store=getStore();store.clear();for(const [key,value] of entries)store.setItem(key,value);};
   const origin=new URL(s.url).origin;
   const localEntries=s.localStorageByOrigin?.[origin]??s.localStorage;
@@ -874,6 +879,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
     const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB)));
+    if (typeof value === 'object' && value !== null && 'opaqueDocument' in value && value.opaqueDocument === true) return;
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error(`Servo returned invalid browser restore state: ${JSON.stringify(value).slice(0, 512)}`);
     }
@@ -977,15 +983,31 @@ export class ServoBrowserSession extends DurableObject<Env> {
       || (snapshot.origin ?? new URL(snapshot.url).origin) === origin;
   }
 
+  private inlineDocumentHtml(url: string | null): string | undefined {
+    if (!url || new URL(url).origin !== 'https://servo-inline.invalid') return undefined;
+    return this.readAsset('initial-html');
+  }
+
+  private async reloadDocument(runtime: ServoRuntime, readiness: PageReadinessOptions, rejectionMessage: string): Promise<void> {
+    const before = await runtime.navigationIdentity();
+    const html = this.inlineDocumentHtml(before.url);
+    if (html !== undefined && before.url) {
+      await runtime.navigateHtml(html, { url: before.url, readiness });
+      return;
+    }
+    if (!runtime.reload()) throw new Error(rejectionMessage);
+    const committed = await runtime.waitForNavigationCommit(before);
+    if (!committed.committed) throw new Error('Servo reload did not commit a document.');
+    await awaitReady(runtime, readiness);
+  }
+
   private async restoreNavigatedOrigin(runtime: ServoRuntime, url: string): Promise<void> {
     const snapshot = this.loadSnapshot(url);
     if (!snapshot) return;
     if (!snapshot.originAssets && !this.hasSavedOrigin(snapshot, url)) return;
     const restored = await this.applySavedState(runtime, snapshot, url);
     if (restored.hasStorage || restored.hasCookies || restored.hasIndexedDBState || restored.indexedDatabases) {
-      if (!runtime.reload()) throw new Error('Servo could not reload after restoring this tab origin.');
-      await pump(runtime);
-      await awaitReady(runtime);
+      await this.reloadDocument(runtime, {}, 'Servo could not reload after restoring this tab origin.');
       await this.applySavedState(runtime, snapshot, url, true);
     }
   }
@@ -1027,11 +1049,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
     if (!snapshot) throw new Error('Browser session has no saved tab state to restore.');
     const runtime = await this.createRuntime(row.width, row.height, this.sessionId(), snapshot.cookieState);
     try {
-      const initialHtml = this.readAsset('initial-html');
-      const parsedUrl = new URL(snapshot.url);
-      const isInlineDocument = parsedUrl.origin === 'https://servo-inline.invalid' && initialHtml !== undefined;
+      const initialHtml = this.inlineDocumentHtml(snapshot.url);
+      const isInlineDocument = initialHtml !== undefined;
       const isBlankDocument = snapshot.url === 'about:blank';
-      const url = isBlankDocument ? snapshot.url : isInlineDocument ? parsedUrl.href : assertPublicHttpUrl(snapshot.url).href;
+      const url = isBlankDocument ? snapshot.url : isInlineDocument ? snapshot.url : assertPublicHttpUrl(snapshot.url).href;
       const loaded = isBlankDocument || (isInlineDocument
         ? runtime.loadHtml(initialHtml, { url })
         : runtime.loadPage(url));
@@ -1351,11 +1372,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   async reload(readiness: PageReadinessOptions = {}): Promise<BrowserActionResult> {
     return this.operate(async (runtime) => {
-      const before = await runtime.navigationIdentity();
-      if (!runtime.reload()) throw new Error('Servo could not reload the current page.');
-      const committed = await runtime.waitForNavigationCommit(before);
-      if (!committed.committed) throw new Error('Servo reload did not commit a document.');
-      await awaitReady(runtime, readiness);
+      await this.reloadDocument(runtime, readiness, 'Servo could not reload the current page.');
       return { action: 'reload', page: await this.summary(runtime) };
     });
   }
