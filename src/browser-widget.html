@@ -106,10 +106,12 @@
     pushAll(result?._meta?.mcp_tool_result?._meta?.ui?.screenshots);
     pushAll(result?._meta?.call_tool_result?._meta?.ui?.screenshots);
     const parts = Array.isArray(result?.content) ? result.content : [];
-    parts.forEach((part, index) => {
-      if (part?.type === 'image' && typeof part.data === 'string' && part.data && /^image\/(png|jpeg|webp|gif)$/.test(part.mimeType || '')) {
-        found.push({ mimeType: part.mimeType, data: part.data, imageIndex: index });
-      }
+    const responses = Array.isArray(result?.structuredContent?.responses) ? result.structuredContent.responses : [];
+    parts.filter((part) => part?.type === 'image').forEach((part, imageIndex) => {
+      if (typeof part.data !== 'string' || !part.data || !/^image\/(png|jpeg|webp|gif)$/.test(part.mimeType || '')) return;
+      const entry = responses.find((entry) => entry?.response?.imageIndex === imageIndex);
+      if (!entry && responses.length > 1) return;
+      found.push({ mimeType: part.mimeType, data: part.data, imageIndex, sessionID: (entry ?? responses[0])?.sessionID });
     });
     return found;
   }
@@ -134,8 +136,8 @@
     return true;
   }
   function preferredShot(shots) {
-    if (!shots.length) return undefined;
-    return shots.find((shot) => shot.sessionID === sessionId) || shots[0];
+    if (!sessionId) return shots[0];
+    return shots.find((shot) => shot.sessionID === sessionId) || shots.find((shot) => !shot.sessionID);
   }
   function pageOf(entry) {
     const page = entry?.response?.page;
@@ -178,15 +180,15 @@
   function applyResult(result, autoShot = true) {
     if (!result) return false;
     const entry = firstResponse(result);
-    if (entry?.sessionID) {
-      sessionId = entry.sessionID;
-      sessionField.textContent = sessionId;
-    }
-    if (entry?.ok === false) {
-      statusField.textContent = entry.error || 'Servo action failed.';
+    if (entry?.ok === false || (!entry && result.isError)) {
+      statusField.textContent = resultError(result, 'Servo action failed.');
       details.textContent = describe(result);
       reportSize();
       return false;
+    }
+    if (entry?.sessionID) {
+      sessionId = entry.sessionID;
+      sessionField.textContent = sessionId;
     }
     const page = entry ? pageOf(entry) : result.structuredContent;
     const pageUrl = httpUrl(page?.url);
@@ -198,7 +200,7 @@
     else if (shown && !statusField.textContent) statusField.textContent = 'Rendered';
     details.textContent = describe(result);
     reportSize();
-    return entry ? entry.ok !== false : true;
+    return true;
   }
   function applyOpenAi() {
     const openai = window.openai;
@@ -305,21 +307,21 @@
       const navigated = await callTool('servo_navigate', {
         actions: [{ ...(sessionId ? { sessionID: sessionId } : {}), url: urlField.value }],
       });
-      if (!applyResult(navigated, false) || firstResponse(navigated)?.ok === false) throw new Error(resultError(navigated, 'Servo could not load the page.'));
+      if (!applyResult(navigated, false)) throw new Error(resultError(navigated, 'Servo could not load the page.'));
       const script = scriptField.value.trim();
-      let needsShot = !screenshotList(navigated).length;
+      let needsShot = !preferredShot(screenshotList(navigated));
       if (script) {
         if (!sessionId) throw new Error('Navigation did not return a session.');
         statusField.textContent = 'Running page script…';
         const evaluated = await callTool('servo_evaluate', { actions: [{ sessionID: sessionId, script }] });
-        if (!applyResult(evaluated, false) || firstResponse(evaluated)?.ok === false) throw new Error(resultError(evaluated, 'Servo evaluation failed.'));
+        if (!applyResult(evaluated, false)) throw new Error(resultError(evaluated, 'Servo evaluation failed.'));
         needsShot = true;
       }
       if (needsShot) {
         if (!sessionId) throw new Error('Navigation did not return a session.');
         statusField.textContent = 'Capturing screenshot…';
         const rendered = await callTool('servo_screenshot', { actions: [{ sessionID: sessionId }] });
-        if (!applyResult(rendered, false) || firstResponse(rendered)?.ok === false || !screenshotList(rendered).length) {
+        if (!applyResult(rendered, false) || !preferredShot(screenshotList(rendered))) {
           throw new Error(resultError(rendered, 'Servo could not render the page.'));
         }
       }

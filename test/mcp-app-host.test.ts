@@ -274,6 +274,49 @@ describe('MCP Apps browser widget host', () => {
     await page.close();
   });
 
+  live('keeps the selected session and its image together in a mixed batch', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; img-src data:");
+    const selected = '00000000-0000-4000-8000-000000000002';
+    const result = {
+      isError: true,
+      structuredContent: { responses: [
+        { sessionID: 'other', ok: true, response: { imageIndex: 0 } },
+        { sessionID: selected, ok: true, response: { imageIndex: 1, page: { title: 'Selected tab' } } },
+        { sessionID: 'failed', ok: false, error: 'Unrelated error' },
+      ] },
+      content: [
+        { type: 'text', text: 'Two screenshots' },
+        { type: 'image', mimeType: 'image/png', data: ONE_PIXEL.toString('base64') },
+        { type: 'image', mimeType: 'image/png', data: Buffer.from(TWO_PIXEL).toString('base64') },
+      ],
+    };
+    await page.evaluate(({ input, result }) => (window as unknown as { __deliver(input: unknown, result: unknown): void }).__deliver(input, result), {
+      input: { actions: [{ sessionID: selected }] }, result,
+    });
+    await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#preview')?.dataset.state === 'loaded');
+    expect(await frame.evaluate(() => document.querySelector<HTMLImageElement>('#preview')!.naturalWidth)).toBe(2);
+    expect(await frame.evaluate(() => document.querySelector('#status')!.textContent)).toBe('Selected tab');
+    await page.close();
+  });
+
+  live('displays rejected loads and retries without adopting a failed session ID', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'");
+    await page.evaluate(() => {
+      let attempt = 0;
+      (window as unknown as { __reply: () => unknown }).__reply = () => ++attempt === 1
+        ? { isError: true, structuredContent: { responses: [{ sessionID: 'uncreated', ok: false, error: 'Blocked URL' }] } }
+        : { isError: true, content: [{ type: 'text', text: 'Invalid arguments' }] };
+    });
+    await frame.type('#url', 'https://example.com/');
+    await frame.click('#load');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'Blocked URL');
+    await frame.click('#load');
+    await frame.waitForFunction(() => document.querySelector('#status')?.textContent === 'Invalid arguments');
+    const calls = await page.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls);
+    expect(calls).toEqual(Array(2).fill({ name: 'servo_navigate', arguments: { actions: [{ url: 'https://example.com/' }] } }));
+    await page.close();
+  });
+
   live('navigates from the URL field, runs the page script, and refreshes the screenshot', async () => {
     const csp = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: ${origin}`;
     const { page, frame } = await openWidget(csp);
