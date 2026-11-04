@@ -5,8 +5,11 @@
 <title>Servo web search</title>
 <style>
   :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
-  body { margin: 0; padding: 16px; }
-  form { display: flex; gap: 8px; }
+  /* Keep intrinsic content sizing independent of the host iframe viewport. */
+  body { margin: 0; padding: 16px; display: flow-root; overflow-wrap: anywhere; }
+  *, *::before, *::after { box-sizing: border-box; }
+  input, textarea, select { min-width: 0; max-width: 100%; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; }
   input, select, button { font: inherit; padding: 8px; }
   input { flex: 1; min-width: 0; }
   button { cursor: pointer; }
@@ -59,13 +62,35 @@
     });
     return withDeadline(response, timeoutMs).finally(() => pending.delete(id));
   }
+  let lastHeight = 0;
+  let sizeFrame = 0;
+  const sizeObserver = new ResizeObserver(() => reportSize());
+  sizeObserver.observe(document.body);
   function reportSize() {
-    if (!bridgeReady) return;
-    post({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: {
-      width: Math.ceil(document.documentElement.scrollWidth),
-      height: Math.ceil(document.documentElement.scrollHeight),
-    } });
+    if (!bridgeReady || sizeFrame) return;
+    sizeFrame = requestAnimationFrame(() => {
+      sizeFrame = 0;
+      // scrollHeight on the root is at least the iframe's allocated height:
+      // reporting it back prevents shrinking and feeds host layout changes back.
+      const height = Math.ceil(document.body.getBoundingClientRect().height);
+      if (height <= 0 || height === lastHeight) return;
+      lastHeight = height;
+      // A host controls width. Use only the negotiated sizing transport.
+      if (bridgeInitialized) {
+        post({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height } });
+      } else if (typeof window.openai?.notifyIntrinsicHeight === 'function') {
+        try { window.openai.notifyIntrinsicHeight(height); } catch { /* Optional host hint. */ }
+      }
+    });
   }
+  function stopSizeReporting() {
+    bridgeReady = false;
+    sizeObserver.disconnect();
+    cancelAnimationFrame(sizeFrame);
+    sizeFrame = 0;
+  }
+  window.addEventListener('pagehide', stopSizeReporting);
+
   function applyInput(params) {
     const input = params?.arguments ?? params ?? {};
     if (input.query && queryField.dataset.userEdited !== '1') queryField.value = input.query;
@@ -111,6 +136,7 @@
       return;
     }
     if (message.id !== undefined && (message.method === 'ping' || message.method === 'ui/resource-teardown')) {
+      if (message.method === 'ui/resource-teardown') stopSizeReporting();
       post({ jsonrpc: '2.0', id: message.id, result: {} });
       return;
     }
@@ -128,7 +154,7 @@
   async function connect() {
     try {
       await call('ui/initialize', {
-        appInfo: { name: 'Servo web search', version: '0.5.0' },
+        appInfo: { name: 'Servo web search', version: '0.5.1' },
         appCapabilities: { availableDisplayModes: ['inline'] },
         protocolVersion: '2026-01-26',
       }, 8_000);

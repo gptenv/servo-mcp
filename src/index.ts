@@ -8,9 +8,9 @@ import { ServoBrowserSession, type PageReadinessOptions } from './browser-sessio
 import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, httpPreviewHtml, requestHttp } from './http-tools';
 
-const WIDGET_URI = 'ui://servo/browser-v3.html';
-const HTTP_WIDGET_URI = 'ui://servo/http-v2.html';
-const SEARCH_WIDGET_URI = 'ui://servo/search-v3.html';
+const WIDGET_URI = 'ui://servo/browser-v4.html';
+const HTTP_WIDGET_URI = 'ui://servo/http-v3.html';
+const SEARCH_WIDGET_URI = 'ui://servo/search-v4.html';
 const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
@@ -166,7 +166,7 @@ function errorResult(error: unknown) {
 }
 
 function createServer(env: Env, publicOrigin: string) {
-  const server = new McpServer({ name: 'servo-mcp', version: '0.5.0' }, {
+  const server = new McpServer({ name: 'servo-mcp', version: '0.5.1' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Omit sessionID or use a falsy value on an action to create a new tab automatically and perform that action. There is no standalone session creation tool. Keep a mapping from a short description to its returned sessionID, and pass that exact ID on the action as sessionID for later operations. Every tool returns an ordered top-level responses array with one response object per action, plus metadata counts for all actions. Each focused browser tool runs its action entries concurrently. Sessions expire automatically after 30 days without use.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
@@ -188,8 +188,10 @@ function createServer(env: Env, publicOrigin: string) {
   // Older tool descriptors may still be cached by the host.
   for (const [name, uri, title, description] of [
     ['servo-browser-ui', WIDGET_URI, 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-browser-ui-v3', 'ui://servo/browser-v3.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-v2', 'ui://servo/browser-v2.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-original', 'ui://servo/browser.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-http-ui-v2', 'ui://servo/http-v2.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui-v1', 'ui://servo/http-v1.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui', HTTP_WIDGET_URI, 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
   ]) {
@@ -203,15 +205,17 @@ function createServer(env: Env, publicOrigin: string) {
     }] }));
   }
 
-  server.registerResource('servo-web-search-ui', SEARCH_WIDGET_URI, {
-    title: 'Servo web search',
-    description: 'Search the public web and inspect ranked results.',
-    mimeType: 'text/html;profile=mcp-app',
-    _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
-  }, async (uri) => ({ contents: [{ uri: uri.href,
-    mimeType: 'text/html;profile=mcp-app', text: searchWidgetHtml,
-    _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
-  }] }));
+  for (const [name, uri] of [['servo-web-search-ui', SEARCH_WIDGET_URI], ['servo-web-search-ui-v3', 'ui://servo/search-v3.html']]) {
+    server.registerResource(name, uri, {
+      title: 'Servo web search',
+      description: 'Search the public web and inspect ranked results.',
+      mimeType: 'text/html;profile=mcp-app',
+      _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
+    }, async (uri) => ({ contents: [{ uri: uri.href,
+      mimeType: 'text/html;profile=mcp-app', text: searchWidgetHtml,
+      _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
+    }] }));
+  }
 
   const browserUiMeta = {
     ui: { resourceUri: WIDGET_URI },
@@ -347,7 +351,11 @@ function createServer(env: Env, publicOrigin: string) {
     runSessions(input, (browser, group) => (group.readiness ? browser.inspect(group.readiness) : browser.inspect()).then((page) => withWebResult({ page }))),
   ));
 
-  const httpUiMeta = { ui: { resourceUri: HTTP_WIDGET_URI }, 'openai/outputTemplate': HTTP_WIDGET_URI };
+  const httpUiMeta = {
+    ui: { resourceUri: HTTP_WIDGET_URI, visibility: ['model', 'app'] },
+    'openai/outputTemplate': HTTP_WIDGET_URI,
+    'openai/widgetAccessible': true,
+  };
   const runHttpActions = async (actions: Array<z.infer<typeof httpRequestSchema>>) => {
     const widgetScreenshots: Array<{ actionIndex: number; mimeType: string; url: string; data?: string }> = [];
     const responses = await Promise.all(actions.map(async (action, actionIndex) => {

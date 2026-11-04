@@ -5,7 +5,10 @@
 <title>Servo browser</title>
 <style>
   :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
-  body { margin: 0; padding: 16px; }
+  /* Keep intrinsic content sizing independent of the host iframe viewport. */
+  body { margin: 0; padding: 16px; display: flow-root; overflow-wrap: anywhere; }
+  *, *::before, *::after { box-sizing: border-box; }
+  input, textarea, select { min-width: 0; max-width: 100%; }
   html[data-view="http"] #browser-view, html[data-view="browser"] #http-view { display: none; }
   #http-responses { overflow-wrap: anywhere; }
   #http-responses img { max-width: 100%; height: auto; }
@@ -35,7 +38,12 @@
 </main>
 <main id="http-view">
   <h1>HTTP response</h1>
-  <div id="http-responses" aria-live="polite">Waiting for the response…</div>
+  <datalist id="http-methods"><option value="GET"><option value="POST"><option value="PUT"><option value="PATCH"><option value="DELETE"><option value="HEAD"><option value="OPTIONS"></datalist>
+  <form id="http-form">
+    <div id="http-responses">Waiting for the response…</div>
+    <button id="send-request" type="submit" disabled>Send request</button>
+    <p id="request-status" role="status"></p>
+  </form>
 </main>
 <script>
   const pending = new Map();
@@ -51,8 +59,8 @@
   let httpActions = [];
   let httpResponses;
   let httpShots = [];
-  let lastWidth = 0;
-  let lastHeight = 0;
+  let sendingHttp = false;
+  let renderedHttp;
   const urlField = document.querySelector('#url');
   const scriptField = document.querySelector('#script');
   const statusField = document.querySelector('#status');
@@ -85,19 +93,35 @@
     });
     return withDeadline(response, timeoutMs).finally(() => pending.delete(id));
   }
+  let lastHeight = 0;
+  let sizeFrame = 0;
+  const sizeObserver = new ResizeObserver(() => reportSize());
+  sizeObserver.observe(document.body);
   function reportSize() {
-    if (!bridgeReady) return;
-    const width = Math.ceil(document.documentElement.scrollWidth);
-    const height = Math.ceil(document.documentElement.scrollHeight);
-    if (width === lastWidth && height === lastHeight) return;
-    lastWidth = width;
-    lastHeight = height;
-    post({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { width, height } });
-    const notify = window.openai && window.openai.notifyIntrinsicHeight;
-    if (typeof notify === 'function') {
-      try { notify(height); } catch { /* Host-specific height hints are optional. */ }
-    }
+    if (!bridgeReady || sizeFrame) return;
+    sizeFrame = requestAnimationFrame(() => {
+      sizeFrame = 0;
+      // scrollHeight on the root is at least the iframe's allocated height:
+      // reporting it back prevents shrinking and feeds host layout changes back.
+      const height = Math.ceil(document.body.getBoundingClientRect().height);
+      if (height <= 0 || height === lastHeight) return;
+      lastHeight = height;
+      // A host controls width. Use only the negotiated sizing transport.
+      if (bridgeInitialized) {
+        post({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height } });
+      } else if (typeof window.openai?.notifyIntrinsicHeight === 'function') {
+        try { window.openai.notifyIntrinsicHeight(height); } catch { /* Optional host hint. */ }
+      }
+    });
   }
+  function stopSizeReporting() {
+    bridgeReady = false;
+    sizeObserver.disconnect();
+    cancelAnimationFrame(sizeFrame);
+    sizeFrame = 0;
+  }
+  window.addEventListener('pagehide', stopSizeReporting);
+
   function httpUrl(value) {
     try {
       const url = new URL(value);
@@ -147,6 +171,7 @@
     if (typeof shot.data === 'string' && shot.data) sources.push('data:' + mimeType + ';base64,' + shot.data);
     if (typeof shot.url === 'string' && shot.url) sources.push(shot.url);
     if (!sources.length) return false;
+    if (sources.includes(preview.getAttribute('src')) && ['loading', 'loaded'].includes(preview.dataset.state)) return true;
     let index = 0;
     preview.alt = shot.sessionID ? 'Screenshot of session ' + shot.sessionID : 'Screenshot rendered by Servo';
     preview.dataset.state = 'loading';
@@ -203,20 +228,37 @@
       reportSize();
     }
   }
+  // Host snapshots are JSON values. Compare without cloning large image strings.
+  function sameToolValue(a, b) {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every((key) =>
+      Object.prototype.hasOwnProperty.call(b, key) && sameToolValue(a[key], b[key]));
+  }
   function renderHttp(responses) {
     httpResponses = responses;
+    const state = { responses, actions: httpActions, shots: httpShots };
+    if (sameToolValue(renderedHttp, state)) return;
+    renderedHttp = state;
     const rows = document.querySelector('#http-responses');
     rows.replaceChildren();
-    function requestField(labelText, value, multiline = false) {
+    function requestField(labelText, value, key, multiline = false) {
       const label = document.createElement('label');
       const field = document.createElement(multiline ? 'textarea' : 'input');
-      field.readOnly = true;
+      field.dataset.field = key;
+      if (key === 'url') { field.type = 'url'; field.required = true; }
+      if (key === 'method') { field.required = true; field.setAttribute('list', 'http-methods'); }
+      if (key === 'headers') field.placeholder = '{"Content-Type": "application/json"}';
+      if (key === 'body') field.placeholder = 'Optional request body';
       field.value = value;
       label.append(labelText, field);
       return label;
     }
     for (const entry of responses) {
       const section = document.createElement('section');
+      section.dataset.actionIndex = String(entry.actionIndex);
       const heading = document.createElement('h2');
       const body = document.createElement('pre');
       const payload = entry.response;
@@ -224,16 +266,16 @@
       const request = payload?.request ?? entry.request ?? input;
       section.append(heading);
       if (request?.url) {
-        section.append(requestField('Request URL', request.url));
-        if (request.method) section.append(requestField('Method', request.method));
+        section.append(requestField('Request URL', request.url, 'url'));
+        if (request.method) section.append(requestField('Method', request.method, 'method'));
       }
-      if (input?.body !== undefined || input?.headers) {
+      if (input) {
         const params = document.createElement('details');
         const label = document.createElement('summary');
-        label.textContent = 'Request details';
+        label.textContent = 'Headers and request body';
         params.append(label);
-        if (input.headers) params.append(requestField('Request headers', JSON.stringify(input.headers, null, 2), true));
-        if (input.body !== undefined) params.append(requestField('Request body', input.body, true));
+        params.append(requestField('Request headers', input.headers ? JSON.stringify(input.headers, null, 2) : '', 'headers', true));
+        params.append(requestField('Request body', input.body ?? '', 'body', true));
         section.append(params);
       }
       if (entry.ok && payload?.response) {
@@ -281,6 +323,9 @@
       }
       rows.append(section);
     }
+    const send = document.querySelector('#send-request');
+    send.textContent = responses.length > 1 ? 'Send ' + responses.length + ' requests' : 'Send request';
+    send.disabled = sendingHttp || !responses.length || responses.some((entry) => !httpActions[entry.actionIndex]);
     document.querySelector('#browser-view').hidden = true;
     document.documentElement.dataset.view = 'http';
     reportSize();
@@ -300,11 +345,12 @@
     }
     if (Array.isArray(data?.responses) && (data.kind === 'http' ||
         data.responses.some((entry) => entry?.response?.request && entry.response.response))) {
+      httpShots = Array.isArray(incomingShots) ? incomingShots : [];
       renderHttp(data.responses);
       return true;
     }
     if (document.documentElement.dataset.view === 'http' && result.isError) {
-      document.querySelector('#http-responses').textContent = result.content?.[0]?.text || 'The HTTP request failed.';
+      document.querySelector(httpResponses ? '#request-status' : '#http-responses').textContent = result.content?.[0]?.text || 'The HTTP request failed.';
       reportSize();
       return false;
     }
@@ -332,12 +378,21 @@
     reportSize();
     return true;
   }
-  function applyOpenAi(delta) {
+  function applyOpenAi(delta = window.openai) {
+    let inputChanged = false;
+    let resultChanged = false;
     for (const key of ['toolInput', 'toolOutput', 'toolResponseMetadata']) {
-      const value = delta?.[key] ?? window.openai?.[key];
-      if (value != null) chatGlobals[key] = value;
+      // set_globals also carries theme, maxHeight and display-mode updates.
+      // Never replay cached results (and reload every image) for those events.
+      if (!delta || !Object.prototype.hasOwnProperty.call(delta, key)) continue;
+      const value = delta[key];
+      if (sameToolValue(value, chatGlobals[key])) continue;
+      chatGlobals[key] = value;
+      if (key === 'toolInput') inputChanged = true;
+      else resultChanged = true;
     }
-    if (chatGlobals.toolInput) applyInput(chatGlobals.toolInput);
+    if (inputChanged && chatGlobals.toolInput) applyInput(chatGlobals.toolInput);
+    if (!resultChanged) return;
     const meta = chatGlobals.toolResponseMetadata;
     const output = chatGlobals.toolOutput;
     const result = meta?.mcp_tool_result ?? meta?.call_tool_result ?? {};
@@ -367,6 +422,7 @@
       return;
     }
     if (message.id !== undefined && (message.method === 'ping' || message.method === 'ui/resource-teardown')) {
+      if (message.method === 'ui/resource-teardown') stopSizeReporting();
       post({ jsonrpc: '2.0', id: message.id, result: {} });
       return;
     }
@@ -377,7 +433,7 @@
     }
     handle(message);
   });
-  window.addEventListener('openai:set_globals', (event) => applyOpenAi(event.detail?.globals || window.openai));
+  window.addEventListener('openai:set_globals', (event) => applyOpenAi(event.detail?.globals || {}));
   function finishConnect(result) {
     bridgeReady = true;
     accepting = true;
@@ -390,7 +446,7 @@
   async function connect() {
     try {
       const result = await call('ui/initialize', {
-        appInfo: { name: 'Servo browser', version: '0.5.0' },
+        appInfo: { name: 'Servo browser', version: '0.5.1' },
         appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
         protocolVersion: '2026-01-26',
       }, 8_000);
@@ -465,9 +521,44 @@
       reportSize();
     }
   }
+  async function sendHttp(event) {
+    event.preventDefault();
+    if (sendingHttp || !httpResponses?.length) return;
+    const status = document.querySelector('#request-status');
+    const button = document.querySelector('#send-request');
+    sendingHttp = true;
+    button.disabled = true;
+    status.textContent = 'Sending…';
+    try {
+      const actions = Array.from(document.querySelectorAll('#http-responses section')).map((section) => {
+        const original = httpActions[Number(section.dataset.actionIndex)];
+        if (!original) throw new Error('Original request inputs are not available yet.');
+        const value = (key) => section.querySelector('[data-field="' + key + '"]')?.value ?? '';
+        const action = { ...original, url: value('url'), method: value('method') };
+        const headers = value('headers').trim();
+        if (headers) action.headers = JSON.parse(headers);
+        else delete action.headers;
+        const body = value('body');
+        if (body || original.body !== undefined) action.body = body;
+        else delete action.body;
+        return action;
+      });
+      // Preserve all options (redirects, timeout, limits) from the saved input.
+      httpActions = actions;
+      const result = await callTool('servo_http_request', { actions });
+      if (!applyResult(result, false)) throw new Error(result.content?.[0]?.text || 'The HTTP request failed.');
+      status.textContent = result.isError ? 'Some requests failed. See the responses above.' : 'Request complete.';
+    } catch (error) {
+      status.textContent = String(error?.message ?? error);
+    } finally {
+      sendingHttp = false;
+      button.disabled = !httpResponses?.length || httpResponses.some((entry) => !httpActions[entry.actionIndex]);
+      reportSize();
+    }
+  }
+  document.querySelector('#http-form').addEventListener('submit', sendHttp);
   document.querySelector('#browser-form').addEventListener('submit', loadPage);
   loadButton.addEventListener('click', loadPage);
-  new ResizeObserver(() => reportSize()).observe(document.documentElement);
   applyOpenAi();
   connect();
 </script>

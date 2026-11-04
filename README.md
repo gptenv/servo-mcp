@@ -56,8 +56,17 @@ public-network policy, cross-origin redirects discard credentials, and the
 request duration and response size are capped. The HTTP tools can still cause
 remote side effects, so use POST/PUT/PATCH/DELETE only when intended.
 
-The chat widget opens with the original request and its response. Each completed
-HTTP action also gets an 800 × 600 Servo screenshot of the returned content.
+All HTTP tools share a generic request widget that opens with the original
+request, response, and available screenshot already populated. Edit the URL,
+method (including custom methods), JSON headers, and request body, then press
+**Send request** to make another request through `servo_http_request`. Batches
+show **Send N requests** and send the displayed actions together. Original
+redirect, timeout, and response-size options are preserved. Opening the widget
+never sends a request; host layout updates do not replay results or reload images.
+The browser, HTTP, and search widgets report only intrinsic content height,
+coalesce resize notifications, and stop observing size on teardown.
+
+Each completed HTTP action also gets an 800 × 600 Servo screenshot of the returned content.
 A temporary offline renderer uses the captured body, with scripts and external
 resources blocked. Opening the widget does not repeat the request. Hosted PNGs
 expire after 24 hours. If capture fails, the HTTP response is still available.

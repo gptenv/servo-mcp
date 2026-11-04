@@ -57,6 +57,7 @@ const TWO_PIXEL = png(2, 2, Uint8Array.from([
 function chromePath(): string | undefined {
   const candidates = [
     process.env.CHROME_PATH,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
     '/usr/local/bin/google-chrome',
@@ -73,6 +74,7 @@ function hostPage(): string {
 <script>
   const frame = document.querySelector('#app');
   window.__calls = [];
+  window.__sizes = [];
   window.__initialized = false;
   window.__reply = null;
   window.addEventListener('message', (event) => {
@@ -86,6 +88,11 @@ function hostPage(): string {
         hostInfo: { name: 'harness', version: '1' },
         hostContext: { theme: 'dark', displayMode: 'inline' },
       } }, '*');
+      return;
+    }
+    if (message.method === 'ui/notifications/size-changed') {
+      window.__sizes.push(message.params);
+      if (window.__resize) frame.style.height = message.params.height + 'px';
       return;
     }
     if (message.method === 'ui/notifications/initialized') { window.__initialized = true; return; }
@@ -239,12 +246,146 @@ describe('MCP Apps browser widget host', () => {
     await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#http-responses img')?.naturalWidth === 1);
     expect(await frame.evaluate(() => ({
       url: document.querySelector<HTMLInputElement>('#http-responses input')!.value,
-      body: document.querySelector<HTMLTextAreaElement>('#http-responses details textarea')!.value,
+      body: document.querySelector<HTMLTextAreaElement>('#http-responses [data-field="body"]')!.value,
       response: document.querySelector('#http-responses section > pre')!.textContent,
       status: document.querySelector('#http-responses h2')!.textContent,
       browserHidden: document.querySelector<HTMLElement>('#browser-view')!.hidden,
     }))).toEqual({ url: 'https://example.org/requested', body: 'original body', response: 'created', status: 'POST 201', browserHidden: true });
     expect(await page.evaluate(() => (window as any).__calls)).toEqual([]);
+    await page.close();
+  });
+
+  live('keeps HTTP images and focused fields intact across host layout updates', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:");
+    await frame.evaluate(() => {
+      const globals = {
+        toolInput: { actions: [{ url: 'https://example.org/', method: 'GET' }] },
+        toolOutput: { kind: 'http', responses: [{ ok: true, actionIndex: 0, response: {
+          request: { method: 'GET', url: 'https://example.org/' },
+          response: { status: 200, bodyBytes: 2 }, body: 'ok',
+        } }] },
+        toolResponseMetadata: { ui: { screenshots: [{ actionIndex: 0, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' }] } },
+      };
+      (window as any).openai = globals;
+      window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals } }));
+    });
+    await frame.waitForFunction(() => document.querySelector<HTMLImageElement>('#http-responses img')?.naturalWidth === 1);
+    const stable = await frame.evaluate(async () => {
+      const image = document.querySelector('#http-responses img');
+      const field = document.querySelector<HTMLInputElement>('#http-responses input')!;
+      field.focus();
+      let mutations = 0;
+      const observer = new MutationObserver((records) => { mutations += records.length; });
+      observer.observe(document.querySelector('#http-responses')!, { subtree: true, childList: true, attributes: true });
+      for (let i = 0; i < 40; i += 1) {
+        window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: { maxHeight: 600 + i, theme: 'dark' } } }));
+      }
+      // Some hosts resend a complete snapshot, with unchanged tool objects.
+      window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: (window as any).openai } }));
+      window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: JSON.parse(JSON.stringify((window as any).openai)) } }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      observer.disconnect();
+      return { sameImage: image === document.querySelector('#http-responses img'), focused: document.activeElement === field, mutations };
+    });
+    expect(stable).toEqual({ sameImage: true, focused: true, mutations: 0 });
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([]);
+    await page.close();
+  });
+
+  for (const kind of ['browser', 'search']) {
+    live(`reports intrinsic ${kind} height and settles after content grows and shrinks`, async () => {
+      const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'", kind);
+      await page.waitForFunction(() => (window as any).__sizes.length > 0);
+      const initial = await page.evaluate(() => (window as any).__sizes.at(-1));
+      expect(initial.height).toBeLessThan(900); // The host initially allocates 1200px.
+      expect(initial.width).toBeUndefined(); // The host owns the available width.
+      await page.evaluate(() => {
+        (window as any).__resize = true;
+        document.querySelector<HTMLIFrameElement>('#app')!.style.height = (window as any).__sizes.at(-1).height + 'px';
+      });
+      await frame.evaluate(() => {
+        (window as any).__legacySizes = 0;
+        (window as any).openai = { notifyIntrinsicHeight() { (window as any).__legacySizes += 1; } };
+        const block = document.createElement('div');
+        block.id = 'growth';
+        block.style.height = '1600px';
+        document.body.appendChild(block);
+      });
+      await page.waitForFunction(() => (window as any).__sizes.at(-1).height > 1600);
+      await frame.evaluate(() => document.querySelector('#growth')!.remove());
+      await page.waitForFunction(() => (window as any).__sizes.at(-1).height < 900);
+      const before = await page.evaluate(() => (window as any).__sizes.length);
+      await frame.evaluate(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+      expect(await page.evaluate(() => (window as any).__sizes.length)).toBe(before);
+      expect(await page.evaluate(() => (window as any).__sizes.at(-1).height)).toBe(initial.height);
+      expect(await frame.evaluate(() => (window as any).__legacySizes)).toBe(0);
+      await page.evaluate(() => document.querySelector<HTMLIFrameElement>('#app')!.contentWindow!.postMessage({ jsonrpc: '2.0', id: 'teardown', method: 'ui/resource-teardown' }, '*'));
+      await frame.evaluate(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        document.body.style.paddingBottom = '1900px';
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      expect(await page.evaluate(() => (window as any).__sizes.length)).toBe(before);
+      await page.close();
+    });
+  }
+
+  live('opens populated HTTP requests and sends edited methods, headers and bodies only on submit', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+    await page.evaluate(() => {
+      const request = { url: 'https://example.org/original', method: 'GET' };
+      (window as any).__deliver({ actions: [{ url: request.url, followRedirects: false, maxDurationMs: 4321, maxResponseBytes: 1234 }] }, {
+        structuredContent: { kind: 'http', responses: [{ actionIndex: 0, ok: true, response: {
+          request, response: { status: 200, bodyBytes: 5 }, body: 'saved',
+        } }] },
+      });
+      (window as any).__reply = (params: any) => ({ structuredContent: { kind: 'http', responses: params.arguments.actions.map((request: any, actionIndex: number) => ({
+        actionIndex, ok: true, response: { request, response: { status: 201, bodyBytes: 5 }, body: 'fresh' },
+      })) } });
+    });
+    await frame.waitForFunction(() => document.querySelector('#http-responses section > pre')?.textContent === 'saved');
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([]);
+    expect(await frame.evaluate(() => document.querySelector<HTMLInputElement>('[data-field="url"]')!.value)).toBe('https://example.org/original');
+    await frame.evaluate(() => {
+      const set = (key: string, value: string) => { document.querySelector<HTMLInputElement>('[data-field="' + key + '"]')!.value = value; };
+      set('url', 'https://example.org/edited');
+      set('method', 'PROPFIND');
+      set('headers', JSON.stringify({ 'Content-Type': 'application/xml', 'X-Test': 'edited' }));
+      set('body', '<query/>');
+      const form = document.querySelector<HTMLFormElement>('#http-form')!;
+      form.requestSubmit();
+      form.requestSubmit(); // A double click must not duplicate the request.
+    });
+    await frame.waitForFunction(() => document.querySelector('#request-status')?.textContent === 'Request complete.');
+    const expected = { url: 'https://example.org/edited', method: 'PROPFIND', headers: { 'Content-Type': 'application/xml', 'X-Test': 'edited' }, body: '<query/>', followRedirects: false, maxDurationMs: 4321, maxResponseBytes: 1234 };
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([{ name: 'servo_http_request', arguments: { actions: [expected] } }]);
+    expect(await frame.evaluate(() => document.querySelector('#http-responses section > pre')!.textContent)).toBe('fresh');
+    // The same populated form can send another request, including after an error.
+    await page.evaluate(() => { (window as any).__reply = () => ({ isError: true, content: [{ type: 'text', text: 'Request rejected' }] }); });
+    await frame.click('#send-request');
+    await frame.waitForFunction(() => document.querySelector('#request-status')?.textContent === 'Request rejected');
+    expect(await frame.evaluate(() => document.querySelector<HTMLTextAreaElement>('[data-field="body"]')!.value)).toBe('<query/>');
+    await frame.click('#send-request');
+    await page.waitForFunction(() => (window as any).__calls.length === 3);
+    await page.close();
+  });
+
+  live('labels and preserves all actions when resending a populated batch', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+    await page.evaluate(() => {
+      const actions = [{ url: 'https://example.org/a', method: 'GET' }, { url: 'https://example.org/b', method: 'POST', headers: { 'X-Test': 'batch' }, body: 'original body' }];
+      const result = { structuredContent: { kind: 'http', responses: actions.map((request, actionIndex) => ({ actionIndex, ok: true, response: { request, response: { status: 200 }, body: 'saved ' + actionIndex } })) } };
+      (window as any).__deliver({ actions }, result);
+      (window as any).__reply = () => result;
+    });
+    await frame.waitForFunction(() => document.querySelector('#send-request')?.textContent === 'Send 2 requests');
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([]);
+    await frame.click('#send-request');
+    await frame.waitForFunction(() => document.querySelector('#request-status')?.textContent === 'Request complete.');
+    expect(await page.evaluate(() => (window as any).__calls)).toEqual([{ name: 'servo_http_request', arguments: { actions: [
+      { url: 'https://example.org/a', method: 'GET' },
+      { url: 'https://example.org/b', method: 'POST', headers: { 'X-Test': 'batch' }, body: 'original body' },
+    ] } }]);
     await page.close();
   });
 
