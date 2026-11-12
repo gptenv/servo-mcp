@@ -669,6 +669,14 @@ describe('restore behaviour', () => {
     await expect(session.inspect()).rejects.toThrow(/could not apply the saved tab state/);
   });
 
+  it('rejects a restore result that explicitly reports failure', async () => {
+    scriptRuntime({ resumeState: [{ pageResultValue: { Ok: { String: '{"restored":false}' } } }] });
+    const session = await newSession();
+    seedActiveRow(sql(), Date.now() + 60_000);
+    seedSnapshot(sql(), makeSnapshotJson());
+    await expect(session.inspect()).rejects.toThrow(/could not apply the saved tab state/);
+  });
+
   it('aborts when the post-restore reload fails', async () => {
     scriptRuntime({
       reloadReturns: false,
