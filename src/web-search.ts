@@ -179,7 +179,11 @@ export function dedupeResults(results: WebSearchResult[], limit = DEFAULT_LIMIT)
   return unique;
 }
 
-async function searchProvider(provider: Provider, query: string, limit: number): Promise<WebSearchResult[]> {
+/** Browser-backed callers supply a Servo DOM loader; legacy tests can supply no loader. */
+export type SearchHtmlLoader = (url: URL, provider: Provider) => Promise<string>;
+
+async function searchProvider(provider: Provider, query: string, limit: number, loadHtml?: SearchHtmlLoader): Promise<WebSearchResult[]> {
+  if (loadHtml) return parsers[provider](await loadHtml(endpoints[provider](query, limit), provider), limit);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
   try {
@@ -198,6 +202,7 @@ export async function searchWeb(
   query: string,
   limit = DEFAULT_LIMIT,
   provider: SearchProvider = 'auto',
+  loadHtml?: SearchHtmlLoader,
 ): Promise<{ results: WebSearchResult[]; providers: string[]; failedProviders: string[] }> {
   const trimmed = query.trim();
   if (!trimmed) throw new TypeError('Search query must not be empty.');
@@ -208,7 +213,7 @@ export async function searchWeb(
     ? ['brave', 'google', 'bing', 'duckduckgo', 'yandex']
     : [provider];
 
-  const settled = await Promise.allSettled(selected.map((name) => searchProvider(name, trimmed, count)));
+  const settled = await Promise.allSettled(selected.map((name) => searchProvider(name, trimmed, count, loadHtml)));
   const successful: WebSearchResult[] = [];
   const providers: string[] = [];
   const failedProviders: string[] = [];
