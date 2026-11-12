@@ -11,7 +11,7 @@ change the license of Servo or its other dependencies.
 
 ## MCP tools
 
-The server exposes focused tools. The browser UI is a ChatGPT MCP App resource, and the same app is advertised with a global sidebar entrypoint; browser tools are linked to that shared UI. The search tool has a dedicated search view within the app. Every tool accepts an `actions` array of
+The server exposes focused tools. The browser UI is a ChatGPT MCP App resource, and the same app is advertised with a global sidebar entrypoint; browser tools are linked to that shared UI. The search tool has a dedicated search view within the app. Browser and HTTP tools accept an `actions` array of
 objects; each browser action carries an optional `sessionID` alongside its
 arguments. Omit `sessionID` or set it to a falsy value (`null`, `false`, `0`, or
 `""`) to create a new tab and perform the action. A truthy ID must identify an
@@ -26,8 +26,8 @@ when applicable, and either the action response or its error. A top-level
 `metadata` object reports aggregate response, success, and failure counts.
 Status checks use the same action shape with empty action objects (`{}`). A new
 session created by a status action returns its status; an existing session
-reports runtime availability without forcing a page reload. HTTP actions do
-not allocate browser sessions.
+reports runtime availability without forcing a page reload. HTTP tools now
+create real Servo sessions by default and return their IDs.
 
 - `servo_web_search`
 - `servo_session_status`
@@ -40,21 +40,12 @@ not allocate browser sessions.
 - `servo_recording_start`, `servo_recording_stop`, `servo_recording_status`,
   `servo_recording_download`
 
-The `servo_web_search` tool supports `auto`, `all`, `brave`, `google`, `bing`, `duckduckgo`, and `yandex` provider modes. `auto` and `all` query five public search engines in parallel, prioritize Brave results, tolerate individual provider failures, and deduplicate URLs before returning the bounded result set. The unauthenticated provider adapters use public search pages/feeds, so providers may block automated requests or change markup; the tool reports which providers responded and which failed, though a responding provider may still yield no usable results. It is bounded to 10 results and an 8-second upstream timeout per provider. Search results are discovery data, so use `servo_navigate` to open and inspect the selected pages before relying on their contents.
+The `servo_web_search` tool supports `auto`, `all`, `brave`, `google`, `bing`, `duckduckgo`, and `yandex` providers. It now navigates actual Servo WASM browser sessions to search pages and parses their DOM markup. Each provider uses a separate session; if `sessionID` is supplied the first provider reuses that tab. The result includes a `sessions` object mapping providers to session IDs. Automatic search may start five browsers in parallel and has higher CPU and memory costs than the old Worker-only request adapters. Search engines can change their markup, require JavaScript, or block automated browsing; results are best-effort.
 
-The HTTP request tools call public HTTP(S) endpoints directly. They accept
-`{ "actions": [{ "url": "https://example.com" }, ...] }` without session IDs
-and return ordered objects in the top-level `responses` array, each with
-`actionIndex`, `ok`, and the request response or error. A sibling `metadata`
-object summarizes response, success, and failure counts. Each action in the general tool
-accepts any valid Fetch API method (including extension methods), request
-headers and a UTF-8 body; convenience tools provide common verbs.
-Each HTTP action response includes the HTTP status, final URL, response headers, bounded response body
-(base64 for binary content), and a `results` array with title, URL, snippet,
-and readable page content. Redirect destinations are checked against the
-public-network policy, cross-origin redirects discard credentials, and the
-request duration and response size are capped. The HTTP tools can still cause
-remote side effects, so use POST/PUT/PATCH/DELETE only when intended.
+The HTTP tools send requests via **Servo's in-page `fetch()`**, not Cloudflare's Worker-global `fetch()`. Each HTTP action may contain `sessionID`, `width`, and `height`; omit the ID to create a new Servo browser, or supply an existing one to preserve its cookies and origin. Each result includes the session ID for reuse. New sessions first navigate with GET to the destination **origin root** (for example, `https://api.example.com/`), then invoke the requested method in that browsing context. This bootstrap GET is a real network request. Existing sessions perform the request from their current page origin without navigation.
+
+**Compatibility change:** in-page requests obey normal browser CORS, forbidden-header, cookie, and redirect rules. A request from a tab on a different origin might fail where the old Worker-level HTTP client succeeded. Manual redirects may yield opaque responses with no exposed status or headers. For non-CORS APIs, navigate the tab to the target origin first or use a separate, explicitly non-browser HTTP client outside Servo MCP. Use only public HTTP(S) destinations. Upload bodies must be UTF-8 text; response bodies and execution times remain bounded. Mutating requests are never replayed automatically.
+
 
 All HTTP tools share a generic request widget that opens with the original
 request, response, and available screenshot already populated. Edit the URL,
