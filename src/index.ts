@@ -166,7 +166,7 @@ function errorResult(error: unknown) {
 }
 
 function createServer(env: Env, publicOrigin: string) {
-  const server = new McpServer({ name: 'servo-mcp', version: '0.5.1' }, {
+  const server = new McpServer({ name: 'servo-mcp', version: '0.6.0' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Omit sessionID or use a falsy value on an action to create a new tab automatically and perform that action. There is no standalone session creation tool. Keep a mapping from a short description to its returned sessionID, and pass that exact ID on the action as sessionID for later operations. Every tool returns an ordered top-level responses array with one response object per action, plus metadata counts for all actions. Each focused browser tool runs its action entries concurrently. Sessions expire automatically after 30 days without use.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
