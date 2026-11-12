@@ -358,30 +358,30 @@ function createServer(env: Env, publicOrigin: string) {
   };
   const runHttpActions = async (actions: Array<z.infer<typeof httpRequestSchema>>) => {
     const widgetScreenshots: Array<{ actionIndex: number; mimeType: string; url: string; data?: string }> = [];
-    const responses = await Promise.all(actions.map(async (action, actionIndex) => {
+    // HTTP actions are browser actions: each action has an isolated Servo
+    // session unless the caller explicitly selects an existing session ID.
+    const execution = await runSessions({ actions }, async (browser, action, created) => {
+      const response = requestHttp(action, await browser.requestHttp(action));
       try {
-        const response = await requestHttp(action);
-        try {
-          const id = crypto.randomUUID();
-          const capture = await session(id).captureHttpPreview(httpPreviewHtml(response));
-          widgetScreenshots.push({ actionIndex, mimeType: 'image/png',
-            url: new URL(`/screenshots/${id}/${capture.token}`, publicOrigin).href,
-            ...(capture.inline ? { data: toBase64(capture.inline) } : {}),
-          });
-        } catch {
-          // A failed preview must never cause a completed request to be retried.
-        }
-        return { actionIndex, ok: true, response };
-      } catch (error) {
-        return { actionIndex, ok: false, request: { method: action.method, url: action.url }, ...sessionError(error) };
+        // Use a separate Servo render-only context for the response preview;
+        // never replace the caller's tab or repeat a mutating HTTP operation.
+        const id = crypto.randomUUID();
+        const capture = await session(id).captureHttpPreview(httpPreviewHtml(response));
+        widgetScreenshots.push({ actionIndex: actions.indexOf(action), mimeType: 'image/png',
+          url: new URL('/screenshots/' + id + '/' + capture.token, publicOrigin).href,
+          ...(capture.inline ? { data: toBase64(capture.inline) } : {}),
+        });
+      } catch {
+        // Failed previews must not cause a completed request to be retried.
       }
-    }));
-    return { kind: 'http', responses, widgetScreenshots };
+      return response;
+    }, (action) => ({ url: new URL(action.url).origin + '/' }));
+    return { kind: 'http', ...execution, widgetScreenshots };
   };
 
   server.registerTool('servo_http_request', {
     title: 'Servo HTTP request',
-    description: 'Send an array of public HTTP(S) requests. Each actions entry accepts any valid Fetch API method (including custom extension methods), optional custom request headers and UTF-8 body, redirect policy, timeout, and response-size limit. Returns one response object per request with status, response headers, body (or base64 for binary), and citation-style page results. CONNECT, TRACE, and TRACK are forbidden by the Fetch API.',
+    description: 'Send HTTP(S) requests using a real Servo WASM browser session. Supply sessionID to reuse a tab, or omit it to create a tab at the request origin before performing in-page fetch(). Browser CORS, cookies, redirects and access controls apply; a new session makes an initial GET to the origin. Returns the sessionID with status, headers, body and citation-style results.',
     inputSchema: z.object({ actions: z.array(httpRequestSchema.strict()).min(1).max(20) }).strict(),
     _meta: httpUiMeta,
   }, async ({ actions }) => safely(() => runHttpActions(actions)));
@@ -390,7 +390,7 @@ function createServer(env: Env, publicOrigin: string) {
     const name = `servo_http_${method.toLowerCase()}`;
     server.registerTool(name, {
       title: `Servo HTTP ${method}`,
-      description: `Send an array of ${method} requests to public HTTP(S) URLs with optional custom request headers${['GET', 'HEAD'].includes(method) ? '' : ' and UTF-8 body'}. Returns one response object per request with status, headers, bounded body data, and citation-style page results.`,
+      description: `Perform ${method} requests through Servo browser fetch() in a selected or automatically created session. Browser CORS and cookie policy apply. New sessions first navigate to the destination origin. Returns the resulting sessionID with status, headers and bounded response body.`,
       inputSchema: z.object({ actions: z.array(httpVerbRequestSchema.strict()).min(1).max(20) }).strict(),
       _meta: httpUiMeta,
     }, async ({ actions }) => safely(() => runHttpActions(actions.map((action) => ({ ...action, method })))));
