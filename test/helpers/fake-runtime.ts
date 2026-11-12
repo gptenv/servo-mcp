@@ -328,13 +328,19 @@ export class FakeServoRuntime {
       const ready = await this.waitForPageReady({});
       if (!ready.ready) throw new Error('Saved browser document did not become ready.');
       restored = await this.restoreResumeState(snapshot, url);
+      if (!restored || typeof restored !== 'object' || (restored as { restored?: boolean }).restored !== true) {
+        throw new Error('Servo could not apply the saved tab state.');
+      }
       await this.pumpCooperatively();
     }
     if (!inline && !blank && (restored?.hasStorage || restored?.hasCookies ||
         restored?.hasIndexedDBState || restored?.indexedDatabases)) {
       if (!this.reload()) throw new Error('Servo could not reload the restored tab.');
       await this.pumpCooperatively();
-      await this.restoreResumeState(snapshot, url);
+      const reapplied = await this.restoreResumeState(snapshot, url);
+      if (!reapplied || typeof reapplied !== 'object' || (reapplied as { restored?: boolean }).restored !== true) {
+        throw new Error('Servo could not reapply the saved tab state.');
+      }
       await this.pumpCooperatively();
     }
     return { restored: true, url };
@@ -374,7 +380,10 @@ export class FakeServoRuntime {
   async pageSummary(): Promise<{ url: string; title: string; text: string }> {
     const result: any = await this.evaluate('JSON.stringify({url: location.href, title: document.title, text: ""})');
     if (typeof result?.Ok?.String !== 'string') throw new Error('Servo returned an invalid page summary.');
-    const value = JSON.parse(result.Ok.String);
+    let value: any;
+    try { value = JSON.parse(result.Ok.String); }
+    catch { throw new Error('Servo returned an invalid page summary.'); }
+    if (!value || typeof value !== 'object') throw new Error('Servo returned an invalid page summary.');
     if (typeof value.url !== 'string' || typeof value.title !== 'string' || typeof value.text !== 'string')
       throw new Error('Servo returned an invalid page summary.');
     return value;
