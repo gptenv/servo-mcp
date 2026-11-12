@@ -2,8 +2,10 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
 import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
-import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
-import { MAX_HTTP_REQUEST_BYTES, type HttpRequest, type ServoHttpResponse } from './http-tools';
+// @ts-expect-error New factory is provided by Servo-WASM PR #10, not yet its main-branch artifact.
+import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
+import { assertPublicHttpUrl } from './security';
+import { type HttpRequest, type ServoHttpResponse } from './http-tools';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
@@ -1006,43 +1008,16 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   // URL-based initialization passes its URL to the adapter bootstrap; do not queue a second loadPage().
 
-  private createMeshFetch(): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
-    return async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, { ...init, redirect: 'manual' });
-      assertPublicHttpUrl(request.url);
-      try {
-        return await this.env.MESH.fetch(request);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.fetchFailures.set(request.url, message);
-        throw error;
-      }
-    };
-  }
-
-  private createMeshWebSocketFactory(): (url: string, protocols?: string | string[]) => WebSocket {
-    return (url: string, protocols?: string | string[]) => {
-      assertPublicWebSocketUrl(url);
-      // Request a WebSocket upgrade through the Mesh binding and bridge the
-      // resulting pair. Ordinary WebSockets must never bypass the routing policy.
-      const request = new Request(url, {
-        headers: { Upgrade: 'websocket' },
-      });
-      // Note: full bidirectional bridging is host-specific; the factory returns
-      // a client-side WebSocket after a successful Mesh upgrade when supported.
-      // For unit tests the public-URL gate is the required contract.
-      throw new Error('Mesh WebSocket upgrade bridging is not yet implemented in this host.');
-    };
-  }
-
   private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank', readiness?: PageReadinessOptions): Promise<ServoRuntime> {
-    const runtime = await createServoWorkerRuntime(servoWasm, {
+    const runtime = await createCloudflareServoBrowser(servoWasm, this.env, {
       width,
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      fetchImpl: this.createMeshFetch(),
-      webSocketFactory: this.createMeshWebSocketFactory(),
+      onNetworkResult: (url: string, status: number | null, error: unknown) => {
+        if (error !== null) this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
+        else if (status !== null && status >= 400) this.fetchFailures.set(url, 'HTTP ' + status);
+      },
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxSubrequests: 50,
       log: (message: string) => console.error(`[servo:${sessionId}] ${message.slice(0, 2048)}`),
@@ -1330,51 +1305,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
    */
   async requestHttp(input: HttpRequest): Promise<ServoHttpResponse> {
     const url = assertPublicHttpUrl(input.url).href;
-    const method = input.method.toUpperCase();
-    if (/^(?:CONNECT|TRACE|TRACK)$/.test(method)) throw new TypeError(method + ' is forbidden by the Fetch API.');
-    if (input.body !== undefined && (method === 'GET' || method === 'HEAD')) {
-      throw new TypeError(method + ' requests cannot include a body.');
-    }
-    // Schema string lengths count UTF-16 code units, not transmitted bytes.
-    if (input.body !== undefined && new TextEncoder().encode(input.body).byteLength > MAX_HTTP_REQUEST_BYTES) {
-      throw new RangeError('Request body exceeds 1 MiB.');
-    }
-    // Evaluated fetch() executes in the page realm. Any script in that page can
-    // replace window.fetch and read its arguments before browser CORS applies.
-    // Do not let API secrets cross that boundary until an isolated-world or
-    // engine-native request primitive is available.
-    const sensitiveHeader = Object.keys(input.headers ?? {}).find((header) =>
-      /^(authorization|proxy-authorization|cookie|cookie2|x-api-key|x-auth-token|x-access-token)$/i.test(header));
-    if (sensitiveHeader) throw new TypeError(
-      'The Servo page-script HTTP transport cannot safely carry ' + sensitiveHeader
-      + '. Browser page scripts could intercept credentials; use browser-managed authentication.'
-    );
-    const request = JSON.stringify({
-      url, method, headers: input.headers ?? {}, body: input.body,
-      followRedirects: input.followRedirects, maxResponseBytes: input.maxResponseBytes,
-      maxDurationMs: input.maxDurationMs,
-    });
-    const script = "(async () => {\n  const request = __REQUEST_DATA__;\n  const controller = new AbortController();\n  const timer = setTimeout(() => controller.abort(), request.maxDurationMs);\n  try {\n    const response = await fetch(request.url, {\n      method: request.method, headers: request.headers,\n      ...(request.body === undefined ? {} : { body: request.body }),\n      redirect: request.followRedirects ? 'follow' : 'manual',\n      signal: controller.signal,\n    });\n    const chunks = [];\n    let size = 0;\n    let truncated = false;\n    if (request.method !== 'HEAD' && response.body) {\n      const reader = response.body.getReader();\n      try {\n        while (true) {\n          const next = await reader.read();\n          if (next.done) break;\n          const remaining = request.maxResponseBytes - size;\n          if (next.value.byteLength > remaining) {\n            if (remaining > 0) chunks.push(next.value.subarray(0, remaining));\n            size += Math.max(0, remaining);\n            truncated = true;\n            await reader.cancel('Response body limit reached');\n            break;\n          }\n          chunks.push(next.value);\n          size += next.value.byteLength;\n        }\n      } finally {\n        reader.releaseLock();\n      }\n    }\n    let binary = '';\n    for (const chunk of chunks) {\n      for (let i = 0; i < chunk.byteLength; i += 0x8000) {\n        binary += String.fromCharCode(...chunk.subarray(i, i + 0x8000));\n      }\n    }\n    return JSON.stringify({\n      status: response.status, statusText: response.statusText,\n      url: response.url, redirected: response.redirected,\n      headers: Object.fromEntries(response.headers.entries()),\n      bodyBase64: btoa(binary), bodyBytes: size, truncated,\n    });\n  } finally {\n    clearTimeout(timer);\n  }\n})()".replace('__REQUEST_DATA__', () => request);
-    return this.operate(async (runtime) => {
-      // The bootstrap origin root may redirect, e.g. apex -> www.
-      // Fail before a potentially unauthorized cross-origin fetch.
-      const actualOrigin = new URL(await pageUrl(runtime)).origin;
-      const requestedOrigin = new URL(url).origin;
-      if (actualOrigin !== requestedOrigin) {
-        throw new Error('Servo HTTP origin mismatch: page is at ' + actualOrigin
-          + ', but request targets ' + requestedOrigin + '. Use a same-origin session.');
-      }
-      const result = parseEvaluationResult(await runtime.evaluate(script, {
-        maxDurationMs: Math.min(30_000, input.maxDurationMs + 1_000),
-      }));
-      if (typeof result !== 'object' || result === null || !('status' in result)
-          || typeof result.status !== 'number' || !('bodyBase64' in result)
-          || typeof result.bodyBase64 !== 'string') {
-        throw new Error('Servo did not return a valid HTTP response. This may be a CORS or network failure: '
-          + JSON.stringify(result).slice(0, 1024));
-      }
-      return result as ServoHttpResponse;
-    });
+    return this.operate(async runtime => runtime.requestHttp({ ...input, url }) as Promise<ServoHttpResponse>);
   }
 
   /**
