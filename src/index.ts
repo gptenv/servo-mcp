@@ -392,7 +392,7 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_http_request', {
     title: 'Servo HTTP request',
-    description: 'Send HTTP(S) requests using a real Servo WASM browser session. Supply sessionID to reuse a tab, or omit it to create a tab at the request origin before performing in-page fetch(). Browser CORS, cookies, redirects and access controls apply; a new session makes an initial GET to the origin. Returns the sessionID with status, headers, body and citation-style results.',
+    description: 'Send HTTP(S) requests using a real Servo WASM browser session. Supply sessionID to reuse a tab, or omit it to create a tab at the request origin before performing in-page fetch(). Browser CORS, cookies, redirects and access controls apply; a new session makes an initial GET to the origin. Credential-bearing headers are rejected because page scripts can intercept fetch arguments; the tab origin must match the target URL. Returns the sessionID with status, headers, body and citation-style results.',
     inputSchema: z.object({ actions: z.array(httpRequestSchema.strict()).min(1).max(20) }).strict(),
     _meta: httpUiMeta,
   }, async ({ actions }) => safely(() => runHttpActions(actions)));

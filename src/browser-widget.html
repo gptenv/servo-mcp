@@ -246,7 +246,8 @@
       const action = httpActions[entry.actionIndex];
       if (entry.ok && typeof entry.sessionID === 'string' && action &&
           !Object.prototype.hasOwnProperty.call(action, 'sessionID')) {
-        httpActions[entry.actionIndex] = { ...action, sessionID: entry.sessionID };
+        const { width, height, ...reusableAction } = action;
+        httpActions[entry.actionIndex] = { ...reusableAction, sessionID: entry.sessionID };
       }
     }
     const state = { responses, actions: httpActions, shots: httpShots };

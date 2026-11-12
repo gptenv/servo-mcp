@@ -1020,7 +1020,13 @@ export class ServoBrowserSession extends DurableObject<Env> {
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(input, init).catch((error: unknown) => {
+      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(input, init).then((response) => {
+        // Network-error documents are not the only failed navigations:
+        // 403/429/5xx still produce a document and must fail search providers.
+        const requested = input instanceof Request ? input.url : String(input);
+        if (response.status >= 400) this.fetchFailures.set(requested, 'HTTP ' + response.status);
+        return response;
+      }).catch((error: unknown) => {
         const url = input instanceof Request ? input.url : String(input);
         this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
         throw error;
@@ -1322,6 +1328,16 @@ export class ServoBrowserSession extends DurableObject<Env> {
     if (input.body !== undefined && new TextEncoder().encode(input.body).byteLength > MAX_HTTP_REQUEST_BYTES) {
       throw new RangeError('Request body exceeds 1 MiB.');
     }
+    // Evaluated fetch() executes in the page realm. Any script in that page can
+    // replace window.fetch and read its arguments before browser CORS applies.
+    // Do not let API secrets cross that boundary until an isolated-world or
+    // engine-native request primitive is available.
+    const sensitiveHeader = Object.keys(input.headers ?? {}).find((header) =>
+      /^(authorization|proxy-authorization|cookie|cookie2|x-api-key|x-auth-token|x-access-token)$/i.test(header));
+    if (sensitiveHeader) throw new TypeError(
+      'The Servo page-script HTTP transport cannot safely carry ' + sensitiveHeader
+      + '. Browser page scripts could intercept credentials; use browser-managed authentication.'
+    );
     const request = JSON.stringify({
       url, method, headers: input.headers ?? {}, body: input.body,
       followRedirects: input.followRedirects, maxResponseBytes: input.maxResponseBytes,
@@ -1329,6 +1345,14 @@ export class ServoBrowserSession extends DurableObject<Env> {
     });
     const script = "(async () => {\n  const request = __REQUEST_DATA__;\n  const controller = new AbortController();\n  const timer = setTimeout(() => controller.abort(), request.maxDurationMs);\n  try {\n    const response = await fetch(request.url, {\n      method: request.method, headers: request.headers,\n      ...(request.body === undefined ? {} : { body: request.body }),\n      redirect: request.followRedirects ? 'follow' : 'manual',\n      signal: controller.signal,\n    });\n    const chunks = [];\n    let size = 0;\n    let truncated = false;\n    if (request.method !== 'HEAD' && response.body) {\n      const reader = response.body.getReader();\n      try {\n        while (true) {\n          const next = await reader.read();\n          if (next.done) break;\n          const remaining = request.maxResponseBytes - size;\n          if (next.value.byteLength > remaining) {\n            if (remaining > 0) chunks.push(next.value.subarray(0, remaining));\n            size += Math.max(0, remaining);\n            truncated = true;\n            await reader.cancel('Response body limit reached');\n            break;\n          }\n          chunks.push(next.value);\n          size += next.value.byteLength;\n        }\n      } finally {\n        reader.releaseLock();\n      }\n    }\n    let binary = '';\n    for (const chunk of chunks) {\n      for (let i = 0; i < chunk.byteLength; i += 0x8000) {\n        binary += String.fromCharCode(...chunk.subarray(i, i + 0x8000));\n      }\n    }\n    return JSON.stringify({\n      status: response.status, statusText: response.statusText,\n      url: response.url, redirected: response.redirected,\n      headers: Object.fromEntries(response.headers.entries()),\n      bodyBase64: btoa(binary), bodyBytes: size, truncated,\n    });\n  } finally {\n    clearTimeout(timer);\n  }\n})()".replace('__REQUEST_DATA__', () => request);
     return this.operate(async (runtime) => {
+      // The bootstrap origin root may redirect, e.g. apex -> www.
+      // Fail before a potentially unauthorized cross-origin fetch.
+      const actualOrigin = new URL(await pageUrl(runtime)).origin;
+      const requestedOrigin = new URL(url).origin;
+      if (actualOrigin !== requestedOrigin) {
+        throw new Error('Servo HTTP origin mismatch: page is at ' + actualOrigin
+          + ', but request targets ' + requestedOrigin + '. Use a same-origin session.');
+      }
       const result = parseEvaluationResult(await runtime.evaluate(script, {
         maxDurationMs: Math.min(30_000, input.maxDurationMs + 1_000),
       }));
