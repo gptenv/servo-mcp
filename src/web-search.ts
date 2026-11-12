@@ -181,9 +181,9 @@ async function searchProvider(
 
 export async function searchWeb(
   query: string,
+  loadHtml: SearchHtmlLoader,
   limit = DEFAULT_LIMIT,
   provider: SearchProvider = 'auto',
-  loadHtml: SearchHtmlLoader,
 ): Promise<{ results: WebSearchResult[]; providers: string[]; failedProviders: string[] }> {
   const trimmed = query.trim();
   if (!trimmed) throw new TypeError('Search query must not be empty.');
