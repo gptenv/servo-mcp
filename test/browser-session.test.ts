@@ -906,7 +906,7 @@ describe('operate lifecycle', () => {
     })).rejects.toThrow(/Private, local/);
   });
 
-  it('does not restore another origin when a cross-origin HTTP fetch returns that URL', async () => {
+  it('does not restore another origin when a cross-origin HTTP response returns that URL', async () => {
     const session = await activeSession({ evaluations: {
       [RESUME_MARKER]: okString(validResumeState),
       '(async () => {\n  const request = ': okString({
@@ -923,7 +923,7 @@ describe('operate lifecycle', () => {
     expect(restore).not.toHaveBeenCalled();
   });
 
-  it('preserves literal dollar substitution tokens in request bodies and enforces UTF-8 byte caps', async () => {
+  it('preserves literal dollar tokens in request bodies and enforces UTF-8 byte caps', async () => {
     const session = await activeSession({ evaluations: {
       [RESUME_MARKER]: okString(validResumeState),
       '(async () => {\n  const request = ': okString({
@@ -931,377 +931,7 @@ describe('operate lifecycle', () => {
         redirected: false, headers: {}, bodyBase64: '', bodyBytes: 0, truncated: false,
       }),
     } });
-    const content = 'literal   it('navigates and extracts DOM markup through a Servo session for search', async () => { $ 
-    const html = '<html><body><h1>Search result</h1></body></html>';
-    const session = await activeSession({ evaluations: {
-      [RESUME_MARKER]: okString(validResumeState),
-      "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))": okString(JSON.stringify(html)),
-    } });
-    const result = await session.navigateAndReadHtml('https://public.example/search?q=hello');
-    expect(result.html).toBe(html);
-    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
-    expect(runtime.calls).toContain('loadPage:https://public.example/search?q=hello');
-    expect(runtime.evaluations.some((entry) => entry.script.includes('document.documentElement?.outerHTML'))).toBe(true);
-  });
-
-  it('extracts search HTML only after the navigated origin has been restored', async () => {
-    const html = '<html><body>restored</body></html>';
-    const session = await activeSession({ evaluations: {
-      [RESUME_MARKER]: okString(validResumeState),
-      "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))": okString(JSON.stringify(html)),
-    } });
-    const events: string[] = [];
-    vi.spyOn(session as any, 'restoreNavigatedOrigin').mockImplementation(async () => { events.push('origin-restored'); });
-    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
-    const evaluate = runtime.evaluate.bind(runtime);
-    vi.spyOn(runtime, 'evaluate').mockImplementation(async (source: string, options?: { maxDurationMs?: number }) => {
-      if (source.includes('document.documentElement?.outerHTML')) events.push('html-read');
-      return evaluate(source, options);
-    });
-    const result = await session.navigateAndReadHtml('https://search.example/results');
-    expect(result.html).toBe(html);
-    expect(events).toEqual(['origin-restored', 'html-read']);
-  });
-
-  it('evaluates scripts and parses WebDriver-style results', async () => {
-    const session = await activeSession({ evaluations: { 'document.title': okString('"served"') } });
-    const result = await session.evaluate('document.title');
-    expect(result.value).toEqual({ Ok: { String: '"served"' } });
-    expect(result.page).toBeDefined();
-  });
-
-  it('preserves non-string and malformed WebDriver evaluation payloads', async () => {
-    const session = await activeSession({ evaluations: {
-      number: { Ok: { String: 42 } },
-      malformed: { Ok: { String: '{not json' } },
-    } });
-    expect((await session.evaluate('number')).value).toEqual({ Ok: { String: 42 } });
-    expect((await session.evaluate('malformed')).value).toEqual({ Ok: { String: '{not json' } });
-  });
-
-  it('rejects malformed page summary JSON returned by the browser', async () => {
-    await expect(activeSession({ evaluations: { [SUMMARY_MARKER]: okString('{not json') } }))
-      .rejects.toThrow('Servo returned an invalid page summary.');
-    await expect(activeSession({ evaluations: { [SUMMARY_MARKER]: { Ok: { String: 42 } } } }))
-      .rejects.toThrow('Servo returned an invalid page summary.');
-  });
-
-  it('rejects scripts over 64 KiB', async () => {
-    const session = await activeSession();
-    await expect(session.evaluate('x'.repeat(64 * 1024 + 1))).rejects.toThrow(RangeError);
-  });
-
-  it('surfaces screenshot failures', async () => {
-    const session = await activeSession({ screenshotThrows: new Error('capture failed') });
-    await expect(session.screenshot()).rejects.toThrow('capture failed');
-  });
-
-  it('surfaces pump failures during operations', async () => {
-    const session = await activeSession({ pumpThrows: new Error('pump died') });
-    await expect(session.wait()).rejects.toThrow('pump died');
-  });
-
-  it('registers fonts and assigns sequential asset names', async () => {
-    const session = await activeSession({ registerFontFaces: 3 });
-    expect(await session.registerFont(btoa('abc'))).toEqual({ faces: 3 });
-    expect(await session.registerFont(btoa('def'))).toEqual({ faces: 3 });
-    const names = sql().table('browser_asset')!.rows.filter((row) => String(row.name).startsWith('font:')).map((row) => row.name);
-    expect(names).toEqual(['font:000000', 'font:000001']);
-  });
-
-  it('uses the zero font count when storage returns no count row', async () => {
-    const session = await activeSession({ registerFontFaces: 2 });
-    const database = sql();
-    const realExec = database.exec.bind(database);
-    database.exec = ((statement: string, ...params: unknown[]) => {
-      if (statement.includes('COUNT(DISTINCT name)')) return { toArray: () => [] } as never;
-      return realExec(statement, ...params);
-    }) as typeof database.exec;
-    expect(await session.registerFont(btoa('font'))).toEqual({ faces: 2 });
-    expect(database.table('browser_asset')!.rows[0].name).toBe('font:000000');
-  });
-
-  it('skips the post-operation snapshot when the runtime or session changes mid-operation', async () => {
-    const session = await activeSession();
-    const runtime = createdRuntimes.at(-1) as { options: FakeRuntimeOptions } | undefined;
-    if (!runtime) throw new Error('no runtime created');
-    const internal = session as unknown as { runtime: unknown };
-    const originalRuntime = internal.runtime;
-    runtime.options.pumpFactory = async () => {
-      internal.runtime = null;
-      return { settled: true };
-    };
-    await expect(session.wait()).resolves.toMatchObject({ title: expect.any(String) });
-    expect(internal.runtime).toBeNull();
-    internal.runtime = originalRuntime;
-
-    runtime.options.pumpFactory = async () => {
-      sql().table('browser_session')!.rows[0].status = 'closed';
-      return { settled: true };
-    };
-    await expect(session.wait()).resolves.toMatchObject({ title: expect.any(String) });
-    expect(sql().table('browser_session')!.rows[0].status).toBe('closed');
-  });
-
-  it('serializes concurrent operations onto one queue', async () => {
-    const session = await activeSession({ summary: { url: 'https://public.example/page' } });
-    const [a, b, c] = await Promise.all([session.inspect(), session.wait(), session.inspect()]);
-    expect(a.url).toBe('https://public.example/page');
-    expect(b.url).toBe('https://public.example/page');
-    expect(c.url).toBe('https://public.example/page');
-  });
-});
-
-describe('session termination', () => {
-  it('closes sessions, clears runtimes, and wipes persisted state', async () => {
-    scriptRuntime({});
-    const session = await newSession();
-    await session.initialize(initOptions());
-    expect(await session.close()).toEqual({ status: 'closed' });
-    expect(sql().table('browser_session')!.rows[0].status).toBe('closed');
-    expect(sql().table('browser_snapshot')!.rows).toHaveLength(0);
-    expect(sql().table('browser_asset')!.rows).toHaveLength(0);
-    expect(state.alarms.deleted).toBeGreaterThanOrEqual(1);
-    expect(lastRuntimeCalls()).toContain('reset');
-  });
-
-  it('is idempotent when closing already-closed or missing sessions', async () => {
-    const session = await newSession();
-    expect(await session.close()).toEqual({ status: 'closed' });
-    seedActiveRow(sql(), Date.now() + 60_000, 'closed');
-    expect(await session.close()).toEqual({ status: 'closed' });
-  });
-
-  it('logs reset failures while clearing a trapped runtime', async () => {
-    scriptRuntime({ trapped: true, resetThrows: true });
-    const session = await newSession();
-    await session.initialize(initOptions());
-    // The trapped runtime is discarded (and its failing reset logged) when the
-    // next operation requires a live runtime.
-    await session.inspect();
-    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('servo_session_reset_failed'));
-  });
-
-  it('refuses operations on closed sessions', async () => {
-    const session = await newSession();
-    seedActiveRow(sql(), Date.now() + 60_000, 'closed');
-    await expect(session.inspect()).rejects.toThrow(/is closed/);
-  });
-
-  it('reaps expired leases lazily when an operation requires a runtime', async () => {
-    const session = await newSession();
-    seedActiveRow(sql(), Date.now() - 1);
-    await expect(session.inspect()).rejects.toThrow(/reaped after 30 days/);
-    expect(sql().table('browser_session')!.rows[0].status).toBe('expired');
-    expect(sql().table('browser_snapshot')!.rows).toHaveLength(0);
-    expect(sql().table('browser_asset')!.rows).toHaveLength(0);
-    expect(state.alarms.deleted).toBeGreaterThanOrEqual(1);
-  });
-
-  it('refuses operations on nonexistent sessions', async () => {
-    const session = await newSession();
-    await expect(session.inspect()).rejects.toThrow(/does not exist/);
-  });
-
-  it('reaps long-idle sessions on their alarm', async () => {
-    const session = await newSession();
-    seedActiveRow(sql(), Date.now() - 1);
-    seedSnapshot(sql(), makeSnapshotJson());
-    seedAsset(sql(), 'initial-html', '<html></html>');
-    await session.alarm();
-    expect(sql().table('browser_session')!.rows[0].status).toBe('expired');
-    expect(sql().table('browser_snapshot')!.rows).toHaveLength(0);
-    expect(state.alarms.deleted).toBeGreaterThanOrEqual(1);
-  });
-
-  it('ignores alarms for missing or closed sessions', async () => {
-    const session = await newSession();
-    await session.alarm();
-    seedActiveRow(sql(), Date.now() + 60_000, 'closed');
-    await session.alarm();
-    expect(state.alarms.set).toHaveLength(0);
-  });
-
-  it('renews the lease when the alarm fires while still active', async () => {
-    const session = await newSession();
-    await session.initialize(initOptions());
-    const before = state.alarms.set.length;
-    state.alarms.current = null;
-    await session.alarm();
-    expect(state.alarms.set.length).toBe(before + 1);
-    expect(sql().table('browser_session')!.rows[0].status).toBe('active');
-  });
-
-  it('does not postpone a pending recording alarm when status is polled', async () => {
-    const session = await newSession();
-    await session.initialize(initOptions());
-    sql().table('browser_recording')!.rows.push({
-      id: '00000000-0000-4000-8000-000000000002',
-      status: 'encoding',
-      started_at: Date.now() - 2_000,
-      stopped_at: Date.now(),
-      expires_at: Date.now() + 24 * 60 * 60 * 1_000,
-      fps: 1,
-      max_duration_ms: 3_000,
-      max_frames: 3,
-      target_frames: 2,
-      captured_frames: 2,
-      stored_bytes: 0,
-      width: 320,
-      height: 240,
-      download_token: null,
-      error: null,
-    });
-
-    await session.getScreenRecordingStatus('00000000-0000-4000-8000-000000000002');
-    const scheduledAlarm = state.alarms.current;
-    const setCalls = state.alarms.set.length;
-    expect(scheduledAlarm).toBe(Date.now() + 1_000);
-
-    await vi.advanceTimersByTimeAsync(500);
-    await session.getScreenRecordingStatus('00000000-0000-4000-8000-000000000002');
-
-    expect(state.alarms.current).toBe(scheduledAlarm);
-    expect(state.alarms.set).toHaveLength(setCalls);
-  });
-
-  it('does not schedule an app-level timer to retain the runtime', async () => {
-    scriptRuntime({});
-    const session = await newSession();
-    await session.initialize(initOptions());
-    expect((await session.getStatus()).runtimeAvailable).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(90_000);
-    // The unit harness does not emulate Cloudflare hibernation, but the
-    // application itself must not keep the Durable Object alive with a timer.
-    expect((await session.getStatus()).runtimeAvailable).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('restores the full cookie jar when a runtime must be recreated', async () => {
-    scriptRuntime({});
-    const session = await newSession();
-    await session.initialize(initOptions());
-    expect(createdRuntimes[0].calls).toContain('exportCookieState');
-    // A trapped runtime follows the same snapshot restore path used after a
-    // Durable Object instance is hibernated and its WASM heap is gone.
-    createdRuntimes[0].trapped = true;
-    await session.inspect();
-    expect(createdRuntimes).toHaveLength(2);
-    expect(createdRuntimes[1].restoredCookies).toEqual([new Uint8Array([1, 2, 3])]);
-  });
-
-  it('marks sessions failed when a required restore breaks mid-operation', async () => {
-    scriptRuntime({});
-    const session = await newSession();
-    seedActiveRow(sql(), Date.now() + 60_000);
-    seedSnapshot(sql(), makeSnapshotJson({ url: 'https://public.example/page' }));
-    // First operation succeeds and caches a runtime...
-    await session.inspect();
-    // ...then simulate that runtime trapping, with a broken adapter on restore.
-    createdRuntimes[0].trapped = true;
-    scriptRuntime({});
-    createServoWorkerRuntime.mockRejectedValueOnce(new Error('engine gone'));
-    await expect(session.inspect()).rejects.toThrow(/Saved tab could not be restored: Error: engine gone/);
-    expect(sql().table('browser_session')!.rows[0].status).toBe('failed');
-    expect(state.alarms.deleted).toBeGreaterThanOrEqual(1);
-  });
-
-  it('converts non-Error restore failures into readable messages', async () => {
-    createServoWorkerRuntime.mockClear();
-    const session = await newSession();
-    seedActiveRow(sql(), Date.now() + 60_000);
-    seedSnapshot(sql(), makeSnapshotJson());
-    createServoWorkerRuntime.mockRejectedValueOnce('kaboom');
-    await expect(session.inspect()).rejects.toThrow(/Saved tab could not be restored: kaboom/);
-  });
-});
-
-describe('widget screenshot bytes', () => {
-  it('preserves published PNGs across captures and revokes them on close', async () => {
-    const session = await newSession();
-    await session.initialize(initOptions());
-    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-    await expect(session.publishWidgetScreenshot(new Uint8Array())).rejects.toThrow(/empty/);
-    await expect(session.publishWidgetScreenshot('nope' as unknown as Uint8Array)).rejects.toThrow(/empty/);
-    await expect(session.publishWidgetScreenshot(new Uint8Array(8 * 1024 * 1024 + 1))).rejects.toThrow(/8388608/);
-    const first = await session.publishWidgetScreenshot(pngBytes);
-    expect(first.token).toMatch(/^[0-9a-f-]{36}$/i);
-    const url = `https://worker.example/screenshots/${UUID}/${first.token}`;
-    expect((await session.fetch(new Request(url, { method: 'POST' }))).status).toBe(405);
-    const ok = await session.fetch(new Request(url));
-    expect(ok.status).toBe(200);
-    expect(ok.headers.get('content-type')).toBe('image/png');
-    expect(ok.headers.get('cache-control')).toBe('private, no-store');
-    expect(ok.headers.get('x-content-type-options')).toBe('nosniff');
-    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(pngBytes);
-    const replaced = await session.publishWidgetScreenshot(new Uint8Array([1, 2, 3]));
-    expect((await session.fetch(new Request(url))).status).toBe(200);
-    expect(new Uint8Array(await (await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
-    expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/not-a-token`))).status).toBe(404);
-    expect((await session.fetch(new Request('https://worker.example/screenshots/short'))).status).toBe(404);
-    expect((await session.fetch(new Request('https://worker.example/other'))).status).toBe(404);
-    await session.close();
-    expect((await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${replaced.token}`))).status).toBe(404);
-  });
-  it('round-trips a multi-megabyte capture, evicts the ninth-oldest token, and expires the rest', async () => {
-    const session = await newSession();
-    await session.initialize(initOptions());
-    const png = Uint8Array.from({ length: 2 * 1024 * 1024 + 31 }, (_, i) => (i * 17) % 251);
-    const request = (token: string) => new Request(`https://worker.example/screenshots/${UUID}/${token}`);
-    const first = await session.publishWidgetScreenshot(png);
-    const fetched = await session.fetch(request(first.token));
-    expect(fetched.status).toBe(200);
-    expect(Buffer.from(await fetched.arrayBuffer()).equals(Buffer.from(png))).toBe(true);
-    const sizes = sql().exec<{ size: number }>(
-      'SELECT length(png_blob) AS size FROM browser_widget_screenshot_chunk WHERE token = ? ORDER BY chunk_index', first.token,
-    ).toArray().map(row => row.size);
-    expect(sizes).toEqual([524288, 524288, 524288, 524288, 31]);
-    const small = new Uint8Array([1]);
-    const second = await session.publishWidgetScreenshot(small);
-    for (let i = 0; i < 7; i++) await session.publishWidgetScreenshot(small);
-    expect((await session.fetch(request(first.token))).status).toBe(404);
-    expect((await session.fetch(request(second.token))).status).toBe(200);
-    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
-    expect((await session.fetch(request(second.token))).status).toBe(404);
-    await session.alarm();
-    expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([]);
-  });
-
-  it('rolls back a partially stored PNG without invalidating an earlier link', async () => {
-    const session = await newSession();
-    await session.initialize(initOptions());
-    const existing = await session.publishWidgetScreenshot(new Uint8Array([42]));
-    sql().exec(`CREATE TRIGGER reject_second_chunk BEFORE INSERT ON browser_widget_screenshot_chunk
-      WHEN NEW.chunk_index = 1 BEGIN SELECT RAISE(ABORT, 'chunk write failed'); END`);
-    await expect(session.publishWidgetScreenshot(new Uint8Array(600_000))).rejects.toThrow('chunk write failed');
-    expect(sql().exec('SELECT token FROM browser_widget_screenshot_chunk').toArray()).toEqual([{ token: existing.token }]);
-    const response = await session.fetch(new Request(`https://worker.example/screenshots/${UUID}/${existing.token}`));
-    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([42]);
-  });
-
-  it('migrates a published singleton without changing its URL or extending its lifetime', async () => {
-    await newSession();
-    const token = crypto.randomUUID();
-    const updated = Date.now() - 60_000;
-    sql().exec('INSERT INTO browser_widget_screenshot (singleton, token, png_blob, updated_at) VALUES (1, ?, ?, ?)',
-      token, new Uint8Array([4, 2]).buffer, updated);
-    const restored = new mod.ServoBrowserSession(asDoState(state), {} as Env);
-    const request = new Request(`https://worker.example/screenshots/${UUID}/${token}`);
-    expect([...new Uint8Array(await (await restored.fetch(request)).arrayBuffer())]).toEqual([4, 2]);
-    expect(sql().exec('SELECT token FROM browser_widget_screenshot').toArray()).toEqual([]);
-    vi.setSystemTime(updated + 24 * 60 * 60 * 1000);
-    expect((await restored.fetch(request)).status).toBe(404);
-  });
-
-});
-
-function lastRuntimeCalls(): string[] {
-  const runtime = createdRuntimes.at(-1);
-  if (!runtime) throw new Error('no runtime created');
-  return [...runtime.calls] as string[];
-}
- + "'" + ' end';
+    const content = "literal $& $$ $' end";
     const request = {
       url: 'https://public.example/api', method: 'POST', body: content,
       followRedirects: true, maxResponseBytes: 256, maxDurationMs: 10000,
@@ -1336,6 +966,25 @@ function lastRuntimeCalls(): string[] {
     const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
     expect(runtime.calls).toContain('loadPage:https://public.example/search?q=hello');
     expect(runtime.evaluations.some((entry) => entry.script.includes('document.documentElement?.outerHTML'))).toBe(true);
+  });
+
+  it('extracts search HTML after origin state was restored', async () => {
+    const html = '<html><body>restored</body></html>';
+    const session = await activeSession({ evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))": okString(JSON.stringify(html)),
+    } });
+    const events: string[] = [];
+    vi.spyOn(session as any, 'restoreNavigatedOrigin').mockImplementation(async () => { events.push('origin-restored'); });
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const evaluate = runtime.evaluate.bind(runtime);
+    vi.spyOn(runtime, 'evaluate').mockImplementation(async (source: string, options?: { maxDurationMs?: number }) => {
+      if (source.includes('document.documentElement?.outerHTML')) events.push('html-read');
+      return evaluate(source, options);
+    });
+    const result = await session.navigateAndReadHtml('https://search.example/results');
+    expect(result.html).toBe(html);
+    expect(events).toEqual(['origin-restored', 'html-read']);
   });
 
   it('evaluates scripts and parses WebDriver-style results', async () => {
