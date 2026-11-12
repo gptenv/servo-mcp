@@ -23,9 +23,6 @@ const MAX_RECORDING_OUTPUT_BYTES = 16 * 1024 * 1024;
 const RECORDING_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_RETAINED_RECORDINGS = 3;
 const MAX_RETAINED_RECORDING_BYTES = 64 * 1024 * 1024;
-const RECORDING_FRAME_WIDTH = 960;
-const RECORDING_FRAME_HEIGHT = 540;
-const RECORDING_JPEG_QUALITY = 70;
 
 // Servo keeps the requested HTTP URL on a network-error document, but its
 // security origin is opaque. Its storage must never replace the site's state.
@@ -451,11 +448,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
     try {
       const runtime = await this.requireRuntime();
-      const frame = await runtime.captureRecordingFrame({
-        maxWidth: RECORDING_FRAME_WIDTH,
-        maxHeight: RECORDING_FRAME_HEIGHT,
-        quality: RECORDING_JPEG_QUALITY,
-      });
+      const frame = await runtime.captureRecordingFrame();
       if (frame.jpeg.byteLength > MAX_RECORDING_FRAME_BYTES) {
         throw new RangeError(`A recording frame exceeded ${MAX_RECORDING_FRAME_BYTES} bytes.`);
       }
