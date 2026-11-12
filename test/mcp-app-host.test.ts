@@ -507,8 +507,11 @@ describe('MCP Apps browser widget host', () => {
     await page.evaluate(() => { (window as unknown as { __missingToolMethod: boolean }).__missingToolMethod = true; });
     await frame.evaluate(() => {
       (window as unknown as { openai: unknown }).openai = {
-        async callTool(name: string, args: { query: string }) {
-          return { structuredContent: { results: [{ title: name + ': ' + args.query, url: 'https://example.org' }] } };
+        async callTool(name: string, args: { actions: Array<{ query: string }> }) {
+          return { structuredContent: { responses: [{
+            actionIndex: 0, sessionID: 'mock-browser', ok: true,
+            response: { results: [{ title: name + ': ' + args.actions[0].query, url: 'https://example.org' }] },
+          }] } };
         },
       };
     });
@@ -527,7 +530,7 @@ describe('MCP Apps browser widget host', () => {
       // Advance only this transport deadline. Keep the real message bridge and event loop.
       clock.setTimeout = (callback, delay, ...args) => timer(callback, delay === 30_000 ? 1 : delay, ...args);
       (window as unknown as { openai: unknown }).openai = {
-        async callTool() { return { structuredContent: { results: [] } }; },
+        async callTool() { return { structuredContent: { responses: [{ actionIndex: 0, sessionID: 'mock-browser', ok: true, response: { results: [] } }] } }; },
       };
     });
     await frame.type('#query', 'servo');
