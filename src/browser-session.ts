@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
-import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
+import { createCloudflareServoBrowser, createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
 import { assertPublicHttpUrl } from './security';
 import { MAX_HTTP_REQUEST_BYTES, type HttpRequest, type ServoHttpResponse } from './http-tools';
 

@@ -5,6 +5,7 @@ declare module '*.wasm' {
 
 declare module '*.mjs' {
   export function createServoWorkerRuntime(module: WebAssembly.Module, options?: Record<string, unknown>): Promise<any>;
+  export function createCloudflareServoBrowser(module: WebAssembly.Module, env: any, options?: Record<string, unknown>): Promise<any>;
 }
 
 declare module '*.html' {
