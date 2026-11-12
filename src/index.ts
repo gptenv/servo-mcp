@@ -252,10 +252,10 @@ function createServer(env: Env, publicOrigin: string) {
     inputSchema: z.object({ actions: z.array(searchActionSchema).min(1).max(20) }).strict(),
     _meta: searchUiMeta,
   }, async (input) => safely(async () => runSessions(input, async (browser, action) => {
-    const data = await searchWeb(action.query, action.limit, action.provider, async (url) => {
+    const data = await searchWeb(action.query, async (url) => {
       const page = await browser.navigateAndReadHtml(url.href);
       return page.html;
-    });
+    }, action.limit, action.provider);
     return { query: action.query, provider: action.provider, ...data };
   })));
 
