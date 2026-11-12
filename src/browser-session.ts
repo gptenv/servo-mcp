@@ -215,32 +215,6 @@ function base64ToBytes(encoded: string): Uint8Array {
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
-function snapshotForOrigin(snapshot: ResumeSnapshot, url: string): ResumeSnapshot {
-  const origin = new URL(url).origin;
-  const snapshotOrigin = snapshot.origin ?? new URL(snapshot.url).origin;
-  const hasOriginMaps = snapshot.localStorageByOrigin !== undefined
-    || snapshot.sessionStorageByOrigin !== undefined
-    || snapshot.indexedDBByOrigin !== undefined;
-  return {
-    ...snapshot,
-    url,
-    fields: snapshot.url === url ? snapshot.fields : [],
-    scrollX: snapshot.url === url ? snapshot.scrollX : 0,
-    scrollY: snapshot.url === url ? snapshot.scrollY : 0,
-    localStorage: hasOriginMaps ? snapshot.localStorageByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.localStorage : [],
-    sessionStorage: hasOriginMaps ? snapshot.sessionStorageByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.sessionStorage : [],
-    cookies: snapshot.url === url ? snapshot.cookies : '',
-    indexedDB: hasOriginMaps ? snapshot.indexedDBByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.indexedDB ?? [] : [],
-    indexedDBStatePresent: snapshot.indexedDBByOrigin !== undefined
-      ? Object.hasOwn(snapshot.indexedDBByOrigin, origin)
-      : origin === snapshotOrigin && snapshot.indexedDB !== undefined,
-    localStorageByOrigin: undefined,
-    sessionStorageByOrigin: undefined,
-    indexedDBByOrigin: undefined,
-    originAssets: undefined,
-  };
-}
-
 export class ServoBrowserSession extends DurableObject<Env> {
   private runtime: ServoRuntime | undefined;
   private cachedSessionRow: SessionRow | undefined;
@@ -743,7 +717,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false) {
-    const result = await runtime.restoreResumeState(snapshotForOrigin(snapshot, url));
+    const result = await runtime.restoreResumeState(snapshot, url);
     if (typeof result !== 'object' || result === null || !('restored' in result)) {
       const action = reapplying ? 'reapply' : 'apply';
       throw new Error(`Servo could not ${action} the saved tab state: ${JSON.stringify(result).slice(0, 512)}`);

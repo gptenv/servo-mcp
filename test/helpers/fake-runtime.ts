@@ -290,8 +290,32 @@ export class FakeServoRuntime {
     return FakeServoRuntime.decodeBrowserValue(await this.evaluate(resumeStateExpression(captureIndexedDB)));
   }
 
-  async restoreResumeState(snapshot: unknown): Promise<unknown> {
-    return FakeServoRuntime.decodeBrowserValue(await this.evaluate(applyResumeState(snapshot)));
+  private static selectResumeStateForOrigin(snapshot: any, url: string): any {
+    const origin = new URL(url).origin;
+    const snapshotOrigin = snapshot.origin ?? new URL(snapshot.url).origin;
+    const mapped = snapshot.localStorageByOrigin !== undefined ||
+      snapshot.sessionStorageByOrigin !== undefined || snapshot.indexedDBByOrigin !== undefined;
+    return {
+      ...snapshot, url,
+      fields: snapshot.url === url ? snapshot.fields : [],
+      scrollX: snapshot.url === url ? snapshot.scrollX : 0,
+      scrollY: snapshot.url === url ? snapshot.scrollY : 0,
+      localStorage: mapped ? snapshot.localStorageByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.localStorage : [],
+      sessionStorage: mapped ? snapshot.sessionStorageByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.sessionStorage : [],
+      cookies: snapshot.url === url ? snapshot.cookies : '',
+      indexedDB: mapped ? snapshot.indexedDBByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.indexedDB ?? [] : [],
+      indexedDBStatePresent: snapshot.indexedDBByOrigin !== undefined
+        ? Object.hasOwn(snapshot.indexedDBByOrigin, origin)
+        : origin === snapshotOrigin && snapshot.indexedDB !== undefined,
+      localStorageByOrigin: undefined,
+      sessionStorageByOrigin: undefined,
+      indexedDBByOrigin: undefined,
+      originAssets: undefined,
+    };
+  }
+
+  async restoreResumeState(snapshot: unknown, url = (snapshot as { url: string }).url): Promise<unknown> {
+    return FakeServoRuntime.decodeBrowserValue(await this.evaluate(applyResumeState(FakeServoRuntime.selectResumeStateForOrigin(snapshot, url))));
   }
 
   async probeStorage(key: string, reset = false): Promise<unknown> {
