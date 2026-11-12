@@ -45,7 +45,11 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   createdRuntimes.push(runtime);
   return runtime;
 });
-vi.mock('./helpers/servo-worker-adapter.ts', () => ({ createServoWorkerRuntime, createCloudflareServoBrowser: createServoWorkerRuntime }));
+vi.mock('./helpers/servo-worker-adapter.ts', () => ({
+  createServoWorkerRuntime,
+  createCloudflareServoBrowser: (wasm: unknown, _env: unknown, config: Record<string, unknown>) =>
+    createServoWorkerRuntime(wasm, config),
+}));
 vi.mock('../src/vendor/servo-worker/servo_js_wasm.wasm', () => ({
   default: {},
 }));
@@ -925,7 +929,7 @@ describe('operate lifecycle', () => {
       url: 'https://public.example/api', method: 'GET',
       headers: { Authorization: 'Bearer fixture-only' },
       followRedirects: true, maxResponseBytes: 10, maxDurationMs: 5000,
-    })).rejects.toThrow(/cannot safely carry Authorization/);
+    })).rejects.toThrow(/cannot carry Authorization/);
     await expect(session.requestHttp({
       url: 'http://127.0.0.1/', method: 'GET', followRedirects: true,
       maxResponseBytes: 10, maxDurationMs: 5000,
