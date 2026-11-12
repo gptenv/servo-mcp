@@ -86,6 +86,23 @@ export class FakeServoRuntime {
     return JSON.parse(value.Ok.String);
   }
 
+  async pageSummary(): Promise<{ url: string; title: string; text: string }> {
+    const result: any = await this.evaluate('JSON.stringify({url: location.href, title: document.title, text: ""})');
+    if (typeof result?.Ok?.String !== 'string') throw new Error('Servo returned an invalid page summary.');
+    const value = JSON.parse(result.Ok.String);
+    if (typeof value.url !== 'string' || typeof value.title !== 'string' || typeof value.text !== 'string')
+      throw new Error('Servo returned an invalid page summary.');
+    return value;
+  }
+
+  async documentHtml(): Promise<string> {
+    const result: any = await this.evaluate("JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))");
+    if (typeof result?.Ok?.String !== 'string') throw new Error('Servo did not return the document HTML.');
+    const value = JSON.parse(result.Ok.String);
+    if (typeof value !== 'string') throw new Error('Servo did not return the document HTML.');
+    return value;
+  }
+
   setInitialUrl(url: string): void {
     this.currentUrl = url;
     this.pendingNavigation = null;

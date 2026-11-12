@@ -271,3 +271,9 @@ set `SERVO_WASM_SOURCE_BRANCH` to the corresponding PR branch and optionally
 pin `SERVO_WASM_SOURCE_SHA` to a specific commit. Production defaults to
 verified `main` artifacts. Merge Servo-WASM's matching API before deploying
 Servo-MCP to production.
+
+### Browser document ownership
+
+Page summaries and document HTML extraction are handled by Servo-WASM's
+`pageSummary()` and `documentHtml()` runtime APIs. MCP supplies session
+routing and response envelopes, not the browser DOM extraction expressions.
