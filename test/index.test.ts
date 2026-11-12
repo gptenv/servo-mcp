@@ -375,6 +375,7 @@ describe('focused browser tools', () => {
       ['servo_recording_start', {}, 'startScreenRecording'], ['servo_recording_stop', { recordingId }, 'stopScreenRecording'],
       ['servo_recording_status', { recordingId }, 'getScreenRecordingStatus'],
       ['servo_recording_download', { recordingId }, 'getScreenRecordingDownloadInfo'],
+      ['servo_web_search', { query: 'article', provider: 'bing' }, 'navigateAndReadHtml'],
     ];
     for (const [tool, args, method] of cases) {
       defaultSession.initialize.mockClear();
@@ -397,11 +398,11 @@ describe('focused browser tools', () => {
     for (const [name, tool] of harness.tools) {
       // All tools including HTTP now accept a session selector.
       const inputs: Record<string, unknown> = {
-        sessionID: sessionId, url: 'https://example.com/', script: '1', x: 1, y: 2, text: 'x', key: 'Enter',
+        sessionID: sessionId, query: 'article', url: 'https://example.com/', script: '1', x: 1, y: 2, text: 'x', key: 'Enter',
         deltaX: 0, deltaY: 1, direction: 'back', fontBase64: 'Zm9udA==',
         recordingId: '00000000-0000-4000-8000-000000000003',
       };
-      if (name === 'servo_web_search' || name === 'servo_app_open') continue;
+      if (name === 'servo_app_open') continue;
       const allowed = tool.definition.inputSchema.shape.actions.element.shape;
       const action = Object.fromEntries(Object.entries(inputs).filter(([key]) => key in allowed));
       const response = structured(await invoke(name, { actions: [action] }));
@@ -439,7 +440,7 @@ describe('focused browser tools', () => {
       const schema = z.toJSONSchema(tool.definition.inputSchema, { io: 'input' }) as any;
       expect(schema.properties).toHaveProperty('actions');
       expect(schema.properties).not.toHaveProperty('sessionIDs');
-      if (!name.startsWith('servo_http_')) expect(schema.properties.actions.items.properties).toHaveProperty('sessionID');
+      expect(schema.properties.actions.items.properties).toHaveProperty('sessionID');
       expect(schema.properties).not.toHaveProperty('sessions');
       expect(schema.required).toContain('actions');
     }
@@ -646,13 +647,49 @@ describe('focused browser tools', () => {
     vi.stubGlobal('fetch', fetchMock);
     try {
       const result = structured(await invoke('servo_web_search', {
-        query: 'article', provider: 'bing', sessionID: sessionId,
+        actions: [{ query: 'article', provider: 'bing', sessionID: sessionId }],
       }));
-      expect(result.sessions.bing).toBe(sessionId);
-      expect(result.providers).toEqual(['bing']);
-      expect(result.results[0]).toMatchObject({ title: 'Result', url: 'https://example.org/article' });
+      expect(result.responses[0]).toMatchObject({ actionIndex: 0, ok: true, sessionID: sessionId });
+      expect(result.responses[0].response.providers).toEqual(['bing']);
+      expect(result.responses[0].response.results[0]).toMatchObject({ title: 'Result', url: 'https://example.org/article' });
       expect(defaultSession.navigateAndReadHtml).toHaveBeenCalledWith(expect.stringContaining('bing.com/search'));
       expect(fetchMock).not.toHaveBeenCalled();
     } finally { vi.unstubAllGlobals(); }
   });
+  it('treats null, false, zero, empty and absent IDs as new sessions for HTTP and search batches', async () => {
+    const values = [null, false, 0, '', undefined] as const;
+    for (const [name, extra, method] of [
+      ['servo_http_request', { url: 'https://example.com/api', method: 'GET' }, 'requestHttp'],
+      ['servo_http_post', { url: 'https://example.com/api', body: 'ok' }, 'requestHttp'],
+      ['servo_web_search', { query: 'servo', provider: 'bing' }, 'navigateAndReadHtml'],
+    ] as const) {
+      defaultSession.initialize.mockClear();
+      defaultSession[method].mockClear();
+      const actions = values.map((sessionID) => ({
+        ...extra, ...(sessionID === undefined ? {} : { sessionID }),
+      }));
+      const result = structured(await invoke(name, { actions }));
+      expect(result.responses).toHaveLength(values.length);
+      expect(result.responses.every((item: { ok: boolean }) => item.ok)).toBe(true);
+      expect(result.responses.map((item: { actionIndex: number }) => item.actionIndex)).toEqual([0, 1, 2, 3, 4]);
+      expect(new Set(result.responses.map((item: { sessionID: string }) => item.sessionID)).size).toBe(values.length);
+      expect(defaultSession.initialize).toHaveBeenCalledTimes(values.length);
+      expect(defaultSession[method]).toHaveBeenCalledTimes(values.length);
+    }
+  });
+
+  it('rejects duplicate explicit IDs per batch for HTTP and search without replacing sessions', async () => {
+    for (const [name, action] of [
+      ['servo_http_get', { url: 'https://example.com/api' }],
+      ['servo_web_search', { query: 'servo', provider: 'bing' }],
+    ] as const) {
+      const result = structured(await invoke(name, {
+        actions: [{ sessionID: sessionId, ...action }, { sessionID: sessionId, ...action }],
+      }));
+      expect(result.responses.every((item: { ok: boolean }) => !item.ok)).toBe(true);
+      expect(result.responses[0].error).toMatch(/only once/);
+      expect(result.responses[1].error).toMatch(/only once/);
+    }
+  });
+
 });
