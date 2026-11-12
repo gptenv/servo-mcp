@@ -1,8 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
-import { createServoWorkerRuntime, renderOfflineHtmlPreview } from './vendor/servo-worker/worker-adapter.mjs';
-import { createCloudflareServoBrowser, planServoRecordingCapture, planServoRecordingFinalization } from './vendor/servo-worker/worker-adapter.mjs';
+import { createServoWorkerRuntime, renderOfflineHtmlPreview, planServoRecordingCapture, planServoRecordingFinalization } from './vendor/servo-worker/worker-adapter.mjs';
+import { createCloudflareServoBrowser } from './cloudflare-browser';
 import { assertPublicHttpUrl } from './security';
 import { type HttpRequest, type ServoHttpResponse } from './http-tools';
 
