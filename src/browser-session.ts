@@ -1,8 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
-import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
-import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
+import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
+import { assertPublicHttpUrl } from './security';
 import { MAX_HTTP_REQUEST_BYTES, type HttpRequest, type ServoHttpResponse } from './http-tools';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
@@ -300,54 +300,6 @@ function parseEvaluationResult(result: unknown): unknown {
   const value = (result as { Ok?: { String?: unknown } }).Ok?.String;
   if (typeof value !== 'string') return result;
   try { return JSON.parse(value); } catch { return result; }
-}
-
-type MeshEgress = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
-
-async function publicFetch(mesh: MeshEgress, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  assertPublicHttpUrl(input instanceof Request ? input.url : String(input));
-  // Preserve Request method, headers, body, credentials and other properties.
-  // A URL-only fetch silently changes a POST/PATCH/etc. back into a GET.
-  // The Worker host, not page JavaScript, controls redirect processing.
-  const request = new Request(input, { ...init, redirect: 'manual' });
-  // Do not silently use global fetch: all network egress must traverse Mesh.
-  return mesh.fetch(request);
-}
-
-/**
- * Bridge a synchronous Servo WebSocket factory to the asynchronous Workers VPC
- * fetch upgrade. Neither endpoint ever falls back to an unrouted WebSocket.
- * Cloudflare's Mesh binding decides whether it supports the requested upgrade.
- */
-function publicWebSocket(mesh: MeshEgress, url: string, protocols?: string | string[]): WebSocket {
-  const verified = assertPublicWebSocketUrl(url);
-  const pair = new WebSocketPair();
-  const [client, bridge] = Object.values(pair) as [WebSocket, WebSocket];
-  client.accept();
-  bridge.accept();
-  const closeBoth = (code = 1011, reason = 'Mesh WebSocket bridge closed') => {
-    for (const socket of [bridge, client]) {
-      try { socket.close(code, reason.slice(0, 100)); } catch { /* already closed */ }
-    }
-  };
-  void (async () => {
-    const target = verified.href.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
-    const headers = new Headers({ Upgrade: 'websocket' });
-    if (protocols) headers.set('Sec-WebSocket-Protocol', Array.isArray(protocols) ? protocols.join(', ') : protocols);
-    const response = await mesh.fetch(target, { headers });
-    const remote = response.webSocket;
-    if (response.status !== 101 || !remote) throw new Error('Mesh did not establish a WebSocket upgrade.');
-    remote.accept();
-    bridge.addEventListener('message', (event) => { try { remote.send(event.data); } catch { closeBoth(); } });
-    remote.addEventListener('message', (event) => { try { bridge.send(event.data); } catch { closeBoth(); } });
-    bridge.addEventListener('close', (event) => { try { remote.close(event.code || 1000, event.reason); } catch {} });
-    remote.addEventListener('close', (event) => closeBoth(event.code || 1000, event.reason));
-    remote.addEventListener('error', () => closeBoth());
-  })().catch((error) => {
-    console.error('Mesh WebSocket upgrade failed: ' + String(error));
-    closeBoth();
-  });
-  return client;
 }
 
 async function pump(runtime: ServoRuntime): Promise<void> {
@@ -1054,23 +1006,15 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   // URL-based initialization passes its URL to the adapter bootstrap; do not queue a second loadPage().
   private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank', readiness?: PageReadinessOptions): Promise<ServoRuntime> {
-    const runtime = await createServoWorkerRuntime(servoWasm, {
+    const runtime = await createCloudflareServoBrowser(servoWasm, this.env, {
       width,
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(this.env.MESH, input, init).then((response) => {
-        // Network-error documents are not the only failed navigations:
-        // 403/429/5xx still produce a document and must fail search providers.
-        const requested = input instanceof Request ? input.url : String(input);
-        if (response.status >= 400) this.fetchFailures.set(requested, 'HTTP ' + response.status);
-        return response;
-      }).catch((error: unknown) => {
-        const url = input instanceof Request ? input.url : String(input);
-        this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
-        throw error;
-      }),
-      webSocketFactory: (url: string, protocols?: string | string[]) => publicWebSocket(this.env.MESH, url, protocols),
+      onNetworkResult: (url: string, status: number | null, error: unknown) => {
+        if (error !== null) this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
+        else if (status !== null && status >= 400) this.fetchFailures.set(url, 'HTTP ' + status);
+      },
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxSubrequests: 50,
       log: (message: string) => console.error(`[servo:${sessionId}] ${message.slice(0, 2048)}`),
