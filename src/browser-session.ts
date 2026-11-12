@@ -305,9 +305,13 @@ function parseEvaluationResult(result: unknown): unknown {
 type MeshEgress = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
 
 async function publicFetch(mesh: MeshEgress, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const url = assertPublicHttpUrl(input instanceof Request ? input.url : String(input));
+  assertPublicHttpUrl(input instanceof Request ? input.url : String(input));
+  // Preserve Request method, headers, body, credentials and other properties.
+  // A URL-only fetch silently changes a POST/PATCH/etc. back into a GET.
+  // The Worker host, not page JavaScript, controls redirect processing.
+  const request = new Request(input, { ...init, redirect: 'manual' });
   // Do not silently use global fetch: all network egress must traverse Mesh.
-  return mesh.fetch(url, { ...init, redirect: 'manual' });
+  return mesh.fetch(request);
 }
 
 /**
