@@ -45,7 +45,7 @@ describe('search parsers', () => {
   });
 });
 
-describe('searchWeb via the caller's Servo HTML loader', () => {
+describe("searchWeb via the caller's Servo HTML loader", () => {
   const searchFixture = async (url: URL): Promise<string> => {
     if (url.hostname === 'search.brave.com') {
       return '<div class="snippet"><a href="https://brave.example"><div class="title search-snippet-title" title="Brave result">Brave result</div></a><div class="content">Brave</div></div>';
