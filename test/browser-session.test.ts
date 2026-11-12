@@ -109,7 +109,7 @@ async function newSession(idString = 'session-do-id') {
   state = createFakeDurableObjectState(idString);
   return new mod.ServoBrowserSession(asDoState(state), {
     MESH: { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
-  } as Env);
+  } as unknown as Env);
 }
 
 const sql = () => state.storage.sql as unknown as import('./helpers/fake-sql').FakeSqlDatabase;
