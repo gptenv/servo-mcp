@@ -15,10 +15,6 @@ const MAX_RETAINED_SCREENSHOTS = 8;
 const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
 const SNAPSHOT_CHUNK_CHARS = 200_000;
-const STORAGE_CAPTURE_CHUNK_CHARS = 32_768;
-const MAX_WEB_STORAGE_CAPTURE_CHARS = 512 * 1024;
-const MAX_INDEXEDDB_CAPTURE_BYTES = 2 * 1024 * 1024;
-const MAX_INDEXEDDB_CAPTURE_RECORDS = 5_000;
 const MAX_RECORDING_FPS = 3;
 const MAX_RECORDING_DURATION_SECONDS = 60;
 const MAX_RECORDING_FRAME_BYTES = 1 * 1024 * 1024;
@@ -192,14 +188,6 @@ async function pageUrl(runtime: ServoRuntime): Promise<string> {
     // Fall back to the complete summary for older runtime adapters.
   }
   return (await pageSummary(runtime)).url;
-}
-
-function parseJsonResult(runtime: ServoRuntime): unknown {
-  const result = parseEvaluationResult(runtime.pageResult());
-  if (typeof result === 'string') {
-    try { return JSON.parse(result); } catch { return result; }
-  }
-  return result;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
