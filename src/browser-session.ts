@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
-import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
+import { createServoWorkerRuntime, renderOfflineHtmlPreview } from './vendor/servo-worker/worker-adapter.mjs';
 import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
 import { assertPublicHttpUrl } from './security';
 import { type HttpRequest, type ServoHttpResponse } from './http-tools';
@@ -655,55 +655,6 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return true;
   }
 
-  private async captureWebStorage(
-    runtime: ServoRuntime,
-    storageName: 'localStorage' | 'sessionStorage',
-  ): Promise<[string, string][]> {
-    const temporaryName = `__servoMcpStorageCapture_${crypto.randomUUID().replaceAll('-', '')}`;
-    const temporaryKey = JSON.stringify(temporaryName);
-    const setup = parseEvaluationResult(await runtime.evaluate(
-      `(()=>{if(location.origin==='null')return JSON.stringify({opaque:true,count:0});const store=globalThis[${JSON.stringify(storageName)}];const keys=[];let chars=0;for(let i=0;i<store.length;i++){const key=store.key(i);if(key!==null){const value=String(store.getItem(key)??'');chars+=key.length+value.length;if(chars>${MAX_WEB_STORAGE_CAPTURE_CHARS})throw new RangeError('${storageName} exceeds the ${MAX_WEB_STORAGE_CAPTURE_CHARS} character snapshot safety limit.');keys.push(key);}}globalThis[${temporaryKey}]=keys;return JSON.stringify({count:keys.length});})()`,
-
-    ));
-    if (typeof setup !== 'object' || setup === null || !('count' in setup) || typeof setup.count !== 'number') {
-      throw new Error(`Servo could not enumerate ${storageName}: ${JSON.stringify(setup).slice(0, 512)}`);
-    }
-    if ('opaque' in setup && setup.opaque === true) return [];
-
-    const entries: [string, string][] = [];
-    try {
-      for (let index = 0; index < setup.count; index++) {
-        let key = '';
-        let value = '';
-        let keyLength: number | undefined;
-        let valueLength: number | undefined;
-        for (let offset = 0; keyLength === undefined || offset < Math.max(keyLength, valueLength ?? 0); offset += STORAGE_CAPTURE_CHUNK_CHARS) {
-          const piece = parseEvaluationResult(await runtime.evaluate(
-            `JSON.stringify((()=>{const key=globalThis[${temporaryKey}]?.[${index}];if(typeof key!=='string')throw new Error('Storage changed during snapshot capture.');const value=globalThis[${JSON.stringify(storageName)}].getItem(key);if(value===null)throw new Error('Storage changed during snapshot capture.');return {keyLength:key.length,valueLength:value.length,key:key.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS}),value:value.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS})}})())`,
-
-          ));
-          if (typeof piece !== 'object' || piece === null || !('key' in piece) || typeof piece.key !== 'string'
-            || !('value' in piece) || typeof piece.value !== 'string'
-            || !('keyLength' in piece) || typeof piece.keyLength !== 'number'
-            || !('valueLength' in piece) || typeof piece.valueLength !== 'number') {
-            throw new Error(`Servo could not read ${storageName} entry ${index}: ${JSON.stringify(piece).slice(0, 512)}`);
-          }
-          if (keyLength !== undefined && (keyLength !== piece.keyLength || valueLength !== piece.valueLength)) {
-            throw new Error(`${storageName} changed during snapshot capture.`);
-          }
-          keyLength = piece.keyLength;
-          valueLength = piece.valueLength;
-          key += piece.key;
-          value += piece.value;
-        }
-        entries.push([key, value]);
-      }
-    } finally {
-      await runtime.evaluate(`delete globalThis[${temporaryKey}]`).catch(() => undefined);
-    }
-    return entries;
-  }
-
   private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
     const value = await runtime.captureResumeState({ captureIndexedDB: resources.indexedDB });
@@ -716,10 +667,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const resourcesTouched = resources.localStorage || resources.sessionStorage || resources.indexedDB;
     const existingStorage = resourcesTouched ? this.loadSnapshot(snapshot.url) : undefined;
     snapshot.localStorage = resources.localStorage
-      ? await this.captureWebStorage(runtime, 'localStorage')
+      ? await runtime.captureWebStorage('localStorage')
       : existingStorage?.localStorage ?? [];
     snapshot.sessionStorage = resources.sessionStorage
-      ? await this.captureWebStorage(runtime, 'sessionStorage')
+      ? await runtime.captureWebStorage('sessionStorage')
       : existingStorage?.sessionStorage ?? [];
     snapshot.indexedDB = resources.indexedDB ? snapshot.indexedDB ?? [] : existingStorage?.indexedDB ?? [];
     const origin = snapshot.origin ?? new URL(snapshot.url).origin;
@@ -1409,36 +1360,15 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   async captureHttpPreview(html: string): Promise<{ token: string; byteLength: number; inline?: Uint8Array }> {
-    // Every HTTP action uses a fresh object. Only the PNG is persisted for the widget.
-    const url = 'https://servo-http-preview.invalid/';
-    const readiness = { strategy: 'load', maxDurationMs: 5000 };
-    let documentSent = false;
-    const runtime = await createServoWorkerRuntime(servoWasm, {
-      url, width: 800, height: 600, readiness, scriptBudget: 5_000_000,
-      fetchImpl: async (input: string) => {
-        if (documentSent || String(input) !== url) return new Response(null, { status: 403 });
-        documentSent = true;
-        return new Response(html, { headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'",
-        } });
-      },
-      webSocketFactory: () => { throw new Error('HTTP previews are offline.'); },
-      maxSessionSubrequests: 32,
-    });
-    try {
-      const png: Uint8Array = await runtime.screenshot({ readiness });
-      if (!documentSent || !png.byteLength || png.byteLength > MAX_RESPONSE_BYTES) throw new Error('Invalid HTTP preview.');
-      const token = crypto.randomUUID();
-      this.ctx.storage.transactionSync(() => this.storeScreenshotChunks(token, png, Date.now() + SCREENSHOT_RETENTION_MS));
-      await this.scheduleNextAlarm();
-      return { token, byteLength: png.byteLength, inline: png.byteLength <= 96 * 1024 ? png : undefined };
-    } finally {
-      runtime.reset();
-    }
+    const png: Uint8Array = await renderOfflineHtmlPreview(servoWasm, html);
+    if (!png.byteLength || png.byteLength > MAX_RESPONSE_BYTES) throw new Error('Invalid HTTP preview.');
+    const token = crypto.randomUUID();
+    this.ctx.storage.transactionSync(() => this.storeScreenshotChunks(token, png, Date.now() + SCREENSHOT_RETENTION_MS));
+    await this.scheduleNextAlarm();
+    return { token, byteLength: png.byteLength, inline: png.byteLength <= 96 * 1024 ? png : undefined };
   }
 
-  async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
+    async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
     if (!(png instanceof Uint8Array) || png.byteLength === 0) throw new TypeError('Screenshot bytes are empty.');
     if (png.byteLength > MAX_RESPONSE_BYTES) throw new RangeError('Screenshot exceeds 8388608 bytes.');
     return this.serial(async () => {

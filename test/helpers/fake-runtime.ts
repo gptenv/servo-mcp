@@ -237,6 +237,53 @@ export class FakeServoRuntime {
     return result;
   }
 
+  async captureWebStorage(storageName: 'localStorage' | 'sessionStorage'): Promise<[string, string][]> {
+    const temporaryName = `__servoMcpStorageCapture_${crypto.randomUUID().replaceAll('-', '')}`;
+    const temporaryKey = JSON.stringify(temporaryName);
+    const setup = FakeServoRuntime.decodeBrowserValue(await this.evaluate(
+      `(()=>{if(location.origin==='null')return JSON.stringify({opaque:true,count:0});const store=globalThis[${JSON.stringify(storageName)}];const keys=[];let chars=0;for(let i=0;i<store.length;i++){const key=store.key(i);if(key!==null){const value=String(store.getItem(key)??'');chars+=key.length+value.length;if(chars>${MAX_WEB_STORAGE_CAPTURE_CHARS})throw new RangeError('${storageName} exceeds the ${MAX_WEB_STORAGE_CAPTURE_CHARS} character snapshot safety limit.');keys.push(key);}}globalThis[${temporaryKey}]=keys;return JSON.stringify({count:keys.length});})()`,
+
+    ));
+    if (typeof setup !== 'object' || setup === null || !('count' in setup) || typeof setup.count !== 'number') {
+      throw new Error(`Servo could not enumerate ${storageName}: ${JSON.stringify(setup).slice(0, 512)}`);
+    }
+    if ('opaque' in setup && setup.opaque === true) return [];
+
+    const entries: [string, string][] = [];
+    try {
+      for (let index = 0; index < setup.count; index++) {
+        let key = '';
+        let value = '';
+        let keyLength: number | undefined;
+        let valueLength: number | undefined;
+        for (let offset = 0; keyLength === undefined || offset < Math.max(keyLength, valueLength ?? 0); offset += STORAGE_CAPTURE_CHUNK_CHARS) {
+          const piece = FakeServoRuntime.decodeBrowserValue(await this.evaluate(
+            `JSON.stringify((()=>{const key=globalThis[${temporaryKey}]?.[${index}];if(typeof key!=='string')throw new Error('Storage changed during snapshot capture.');const value=globalThis[${JSON.stringify(storageName)}].getItem(key);if(value===null)throw new Error('Storage changed during snapshot capture.');return {keyLength:key.length,valueLength:value.length,key:key.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS}),value:value.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS})}})())`,
+
+          ));
+          if (typeof piece !== 'object' || piece === null || !('key' in piece) || typeof piece.key !== 'string'
+            || !('value' in piece) || typeof piece.value !== 'string'
+            || !('keyLength' in piece) || typeof piece.keyLength !== 'number'
+            || !('valueLength' in piece) || typeof piece.valueLength !== 'number') {
+            throw new Error(`Servo could not read ${storageName} entry ${index}: ${JSON.stringify(piece).slice(0, 512)}`);
+          }
+          if (keyLength !== undefined && (keyLength !== piece.keyLength || valueLength !== piece.valueLength)) {
+            throw new Error(`${storageName} changed during snapshot capture.`);
+          }
+          keyLength = piece.keyLength;
+          valueLength = piece.valueLength;
+          key += piece.key;
+          value += piece.value;
+        }
+        entries.push([key, value]);
+      }
+    } finally {
+      await this.evaluate(`delete globalThis[${temporaryKey}]`).catch(() => undefined);
+    }
+    return entries;
+  }
+
+
   async captureResumeState({ captureIndexedDB = true } = {}): Promise<unknown> {
     return FakeServoRuntime.decodeBrowserValue(await this.evaluate(resumeStateExpression(captureIndexedDB)));
   }

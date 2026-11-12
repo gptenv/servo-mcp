@@ -47,6 +47,16 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
 });
 vi.mock('./helpers/servo-worker-adapter.ts', () => ({
   createServoWorkerRuntime,
+  renderOfflineHtmlPreview: async (wasm: unknown, _html: string) => {
+    const url = 'https://servo-http-preview.invalid/';
+    const runtime = await createServoWorkerRuntime(wasm, {
+      url, width: 800, height: 600, readiness: { strategy: 'load', maxDurationMs: 5000 },
+      scriptBudget: 5_000_000, fetchImpl: async () => new Response(_html), webSocketFactory: () => {},
+      maxSessionSubrequests: 32,
+    });
+    try { return await runtime.screenshot({ readiness: { strategy: 'load', maxDurationMs: 5000 } }); }
+    finally { runtime.reset(); }
+  },
   createCloudflareServoBrowser: (wasm: unknown, _env: unknown, config: Record<string, unknown>) =>
     createServoWorkerRuntime(wasm, config),
 }));

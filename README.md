@@ -282,3 +282,8 @@ Browser state capture, state application, and page storage probes now call the
 Servo-WASM runtime APIs instead of constructing browser DOM/IndexedDB scripts
 in the MCP session class. Durable Object persistence and recording storage
 still require a separate ownership migration.
+
+The MCP wrapper now calls Servo-WASM's `captureWebStorage()` and
+`renderOfflineHtmlPreview()` rather than creating browser page scripts or
+an independent offline browser runtime. MCP retains the screenshot token and
+asset persistence contract.
