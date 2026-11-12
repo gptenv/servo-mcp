@@ -10,7 +10,7 @@
     "engine:build": "npm run engine:fetch",
     "dev": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js dev --ip 127.0.0.1 --port 8788",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "NODE_OPTIONS=--experimental-sqlite vitest run",
     "deploy": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy",
     "deploy:dry-run": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy --dry-run",
     "deploy:staged": "wrangler deploy"
