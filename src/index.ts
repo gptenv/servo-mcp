@@ -238,18 +238,31 @@ function createServer(env: Env, publicOrigin: string) {
 
   server.registerTool('servo_web_search', {
     title: 'Servo web search',
-    description: 'Search the public web across Brave, Google, Bing, DuckDuckGo, and Yandex. Results are best-effort: public providers may block automated requests or return no parseable results. The response reports successful and failed providers; inspect results with servo_navigate before relying on them.',
+    description: 'Search the public web by navigating real Servo WASM browser sessions to the selected providers and parsing their loaded documents. Supply sessionID to reuse a tab for the first provider. The response reports provider session IDs, successes and failures.',
     inputSchema: z.object({
       query: z.string().trim().min(1).max(512),
       limit: z.number().int().min(1).max(10).default(8),
       provider: z.enum(['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
+      sessionID: z.union([z.string().uuid(), z.literal(null), z.literal(false), z.literal(0), z.literal('')]).optional()
+        .describe('Reuse this Servo browser for the first search provider, or omit to create one session per provider.'),
     }).strict(),
     _meta: searchUiMeta,
-  }, async ({ query, limit, provider }) => safely(async () => ({
-    query,
-    provider,
-    ...(await searchWeb(query, limit, provider)),
-  })));
+  }, async ({ query, limit, provider, sessionID }) => safely(async () => {
+    if (sessionID) await existingSession(sessionID);
+    const sessions: Record<string, string> = {};
+    let assigned = false;
+    const data = await searchWeb(query, limit, provider, async (url, providerName) => {
+      const reuse = !assigned && sessionID ? sessionID : undefined;
+      assigned = true;
+      const id = reuse || crypto.randomUUID();
+      sessions[providerName] = id;
+      const browser = reuse ? await existingSession(id) : session(id);
+      if (!reuse) await browser.initialize({ sessionId: id, width: 1280, height: 720 });
+      const result = await browser.navigateAndReadHtml(url.href);
+      return result.html;
+    });
+    return { query, provider, ...data, sessions };
+  }));
 
   type SessionGroup = { width?: number; height?: number };
   type SessionInput<T extends { sessionID?: unknown }> = { actions: T[] };
