@@ -375,10 +375,10 @@ function createServer(env: Env, publicOrigin: string) {
     // session unless the caller explicitly selects an existing session ID.
     const execution = await runSessions({ actions },
       async (browser, action) => requestHttp(action, await browser.requestHttp(action)),
-      (action) => ({ url: new URL(action.url).origin + '/' }),
+      (action) => ({ url: assertPublicHttpUrl(action.url).origin + '/' }),
     );
     await Promise.all(execution.responses.map(async (entry) => {
-      if (!entry.ok || !entry.response) return;
+      if (!entry.ok || !('response' in entry) || !entry.response) return;
       try {
         // Render a preview separately without changing or replaying the tab's request.
         const id = crypto.randomUUID();
