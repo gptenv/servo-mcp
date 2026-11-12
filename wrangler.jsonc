@@ -3,8 +3,13 @@
   "name": "servo-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-07",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-  "observability": { "enabled": true },
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "observability": {
+    "enabled": true
+  },
   "rules": [
     {
       "type": "CompiledWasm",
@@ -20,10 +25,25 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "BROWSER_SESSIONS", "class_name": "ServoBrowserSession" }
+      {
+        "name": "BROWSER_SESSIONS",
+        "class_name": "ServoBrowserSession"
+      }
     ]
   },
   "migrations": [
-    { "tag": "v1-servo-browser-sessions", "new_sqlite_classes": ["ServoBrowserSession"] }
+    {
+      "tag": "v1-servo-browser-sessions",
+      "new_sqlite_classes": [
+        "ServoBrowserSession"
+      ]
+    }
+  ],
+  "vpc_networks": [
+    {
+      "binding": "MESH",
+      "network_id": "cf1:network",
+      "remote": true
+    }
   ]
 }

@@ -302,13 +302,48 @@ function parseEvaluationResult(result: unknown): unknown {
   try { return JSON.parse(value); } catch { return result; }
 }
 
-async function publicFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+type MeshEgress = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
+
+async function publicFetch(mesh: MeshEgress, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = assertPublicHttpUrl(input instanceof Request ? input.url : String(input));
-  return fetch(url, { ...init, redirect: 'manual' });
+  // Do not silently use global fetch: all network egress must traverse Mesh.
+  return mesh.fetch(url, { ...init, redirect: 'manual' });
 }
 
-function publicWebSocket(url: string, protocols?: string | string[]): WebSocket {
-  return new WebSocket(assertPublicWebSocketUrl(url), protocols);
+/**
+ * Bridge a synchronous Servo WebSocket factory to the asynchronous Workers VPC
+ * fetch upgrade. Neither endpoint ever falls back to an unrouted WebSocket.
+ * Cloudflare's Mesh binding decides whether it supports the requested upgrade.
+ */
+function publicWebSocket(mesh: MeshEgress, url: string, protocols?: string | string[]): WebSocket {
+  const verified = assertPublicWebSocketUrl(url);
+  const pair = new WebSocketPair();
+  const [client, bridge] = Object.values(pair) as [WebSocket, WebSocket];
+  client.accept();
+  bridge.accept();
+  const closeBoth = (code = 1011, reason = 'Mesh WebSocket bridge closed') => {
+    for (const socket of [bridge, client]) {
+      try { socket.close(code, reason.slice(0, 100)); } catch { /* already closed */ }
+    }
+  };
+  void (async () => {
+    const target = verified.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+    const headers = new Headers({ Upgrade: 'websocket' });
+    if (protocols) headers.set('Sec-WebSocket-Protocol', Array.isArray(protocols) ? protocols.join(', ') : protocols);
+    const response = await mesh.fetch(target, { headers });
+    const remote = response.webSocket;
+    if (response.status !== 101 || !remote) throw new Error('Mesh did not establish a WebSocket upgrade.');
+    remote.accept();
+    bridge.addEventListener('message', (event) => { try { remote.send(event.data); } catch { closeBoth(); } });
+    remote.addEventListener('message', (event) => { try { bridge.send(event.data); } catch { closeBoth(); } });
+    bridge.addEventListener('close', (event) => { try { remote.close(event.code || 1000, event.reason); } catch {} });
+    remote.addEventListener('close', (event) => closeBoth(event.code || 1000, event.reason));
+    remote.addEventListener('error', () => closeBoth());
+  })().catch((error) => {
+    console.error('Mesh WebSocket upgrade failed: ' + String(error));
+    closeBoth();
+  });
+  return client;
 }
 
 async function pump(runtime: ServoRuntime): Promise<void> {
@@ -1020,7 +1055,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(input, init).then((response) => {
+      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(this.env.MESH, input, init).then((response) => {
         // Network-error documents are not the only failed navigations:
         // 403/429/5xx still produce a document and must fail search providers.
         const requested = input instanceof Request ? input.url : String(input);
@@ -1031,7 +1066,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
         throw error;
       }),
-      webSocketFactory: publicWebSocket,
+      webSocketFactory: (url: string, protocols?: string | string[]) => publicWebSocket(this.env.MESH, url, protocols),
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxSubrequests: 50,
       log: (message: string) => console.error(`[servo:${sessionId}] ${message.slice(0, 2048)}`),

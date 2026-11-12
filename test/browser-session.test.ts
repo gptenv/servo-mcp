@@ -107,7 +107,9 @@ function initOptions(extra: Record<string, unknown> = {}) {
 
 async function newSession(idString = 'session-do-id') {
   state = createFakeDurableObjectState(idString);
-  return new mod.ServoBrowserSession(asDoState(state), {} as Env);
+  return new mod.ServoBrowserSession(asDoState(state), {
+    MESH: { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+  } as Env);
 }
 
 const sql = () => state.storage.sql as unknown as import('./helpers/fake-sql').FakeSqlDatabase;
@@ -223,15 +225,12 @@ describe('runtime configuration wiring', () => {
     vi.unstubAllGlobals();
   });
 
-  it('creates WebSockets only for public ws:// targets', async () => {
+  it('rejects non-public WebSocket destinations before opening a Mesh upgrade', async () => {
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await session.initialize(initOptions());
     const factory = runtimeConfigs[0].webSocketFactory as (url: string) => unknown;
-    vi.stubGlobal('WebSocket', webSocketFactorySpy);
-    expect(factory('ws://public.example/socket')).toEqual({ fake: true });
     expect(() => factory('ws://localhost/socket')).toThrow(TypeError);
-    vi.unstubAllGlobals();
   });
 });
 
