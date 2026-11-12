@@ -616,16 +616,16 @@ describe('focused browser tools', () => {
         { url: 'http://127.0.0.1/private' },
         { url: 'https://example.com/third' },
       ] });
-      // Invalid private URLs are rejected by the browser's URL policy.
-      // In the indexed mock this is checked by the real schema below.
+      // The MCP router rejects private addresses before creating a session.
       const entries = structured(response).responses;
       expect(entries).toHaveLength(3);
       expect(entries[0]).toMatchObject({ actionIndex: 0, sessionID: sessionId, ok: true });
+      expect(entries[1]).toMatchObject({ actionIndex: 1, ok: false, error: expect.stringMatching(/Private, local/) });
       expect(entries[2]).toMatchObject({ actionIndex: 2, ok: true });
       expect(new Set(entries.map((entry: any) => entry.sessionID)).size).toBe(3);
-      expect(defaultSession.initialize).toHaveBeenCalledTimes(2);
-      expect(defaultSession.requestHttp).toHaveBeenCalledTimes(3);
-      expect(response._meta.ui.screenshots.map((shot: { actionIndex: number }) => shot.actionIndex).sort()).toEqual([0, 1, 2]);
+      expect(defaultSession.initialize).toHaveBeenCalledTimes(1);
+      expect(defaultSession.requestHttp).toHaveBeenCalledTimes(2);
+      expect(response._meta.ui.screenshots.map((shot: { actionIndex: number }) => shot.actionIndex).sort()).toEqual([0, 2]);
       expect(() => registeredTool(name).definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
     }
   });
