@@ -56,123 +56,51 @@ function textFromHtml(source: string): { title: string; text: string } {
   };
 }
 
-async function readBody(response: Response, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-  if (!response.body) return { bytes: new Uint8Array(), truncated: false };
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  let truncated = false;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const remaining = maxBytes - size;
-      if (value.byteLength > remaining) {
-        if (remaining > 0) chunks.push(value.subarray(0, remaining));
-        size += Math.max(remaining, 0);
-        truncated = true;
-        await reader.cancel('Response body limit reached.');
-        break;
-      }
-      chunks.push(value);
-      size += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return { bytes, truncated };
-}
+/** An HTTP response produced by fetch() inside the Servo page context. */
+export type ServoHttpResponse = {
+  status: number;
+  statusText: string;
+  url: string;
+  redirected: boolean;
+  headers: Record<string, string>;
+  bodyBase64: string;
+  bodyBytes: number;
+  truncated: boolean;
+};
 
-function base64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
-
-/** Fetches public HTTP(S) endpoints without allowing redirects to bypass URL policy. */
-export async function requestHttp(input: HttpRequest) {
-  const method = input.method.toUpperCase();
-  if (/^(?:CONNECT|TRACE|TRACK)$/.test(method)) throw new TypeError(`${method} is forbidden by the Fetch API.`);
-  if (input.body !== undefined && (method === 'GET' || method === 'HEAD')) {
-    throw new TypeError(`${method} requests cannot include a body.`);
-  }
-  const encodedBody = input.body === undefined ? undefined : new TextEncoder().encode(input.body);
-  if (encodedBody && encodedBody.byteLength > MAX_REQUEST_BYTES) throw new RangeError('Request body exceeds 1 MiB.');
-
-  let url = assertPublicHttpUrl(input.url);
-  let currentMethod = method;
-  let body = encodedBody;
-  let headers = new Headers({ Accept: '*/*' });
-  for (const [name, value] of Object.entries(input.headers ?? {})) headers.set(name, value);
-  let response: Response | undefined;
-  let redirected = false;
-  const maxRedirects = 5;
-  const signal = AbortSignal.timeout(input.maxDurationMs);
-  for (let hop = 0; hop <= maxRedirects; hop++) {
-    response = await fetch(url, {
-      method: currentMethod,
-      headers,
-      body: body as BodyInit | undefined,
-      redirect: 'manual',
-      signal,
-    });
-    const location = response.headers.get('location');
-    if (![301, 302, 303, 307, 308].includes(response.status) || !location || !input.followRedirects) break;
-    if (hop === maxRedirects) throw new Error('HTTP redirect limit exceeded.');
-    const next = assertPublicHttpUrl(new URL(location, url).href);
-    if (next.origin !== url.origin) {
-      headers.delete('authorization');
-      headers.delete('cookie');
-      headers.delete('proxy-authorization');
-    }
-    if ((response.status === 303 && currentMethod !== 'HEAD') || ((response.status === 301 || response.status === 302) && currentMethod === 'POST')) {
-      currentMethod = 'GET';
-      body = undefined;
-      headers.delete('content-type');
-      headers.delete('content-length');
-    }
-    await response.body?.cancel();
-    url = next;
-    redirected = true;
-  }
-  if (!response) throw new Error('HTTP request did not produce a response.');
-
-  const { bytes, truncated } = await readBody(response, method === 'HEAD' ? 0 : input.maxResponseBytes);
-  const contentType = response.headers.get('content-type') ?? '';
+/**
+ * Format a bounded browser response for MCP. Network access is deliberately
+ * absent here: ServoBrowserSession.requestHttp owns the actual request.
+ */
+export function requestHttp(input: HttpRequest, response: ServoHttpResponse) {
+  const bodyBytes = Uint8Array.from(atob(response.bodyBase64), (char) => char.charCodeAt(0));
+  const contentType = response.headers['content-type'] ?? '';
   const textual = /^(text\/|application\/(?:json|[^;]+\+json|xml|[^;]+\+xml|javascript|x-www-form-urlencoded))/i.test(contentType);
-  const decoded = textual ? new TextDecoder().decode(bytes) : undefined;
+  const decoded = textual ? new TextDecoder().decode(bodyBytes) : undefined;
   const extracted = decoded && /html/i.test(contentType) ? textFromHtml(decoded) : undefined;
   const content = extracted?.text ?? decoded;
-  const title = extracted?.title || response.headers.get('x-page-title') || url.hostname;
-  const responseHeaders = Object.fromEntries(response.headers.entries());
+  const title = extracted?.title || response.headers['x-page-title'] || new URL(input.url).hostname;
   return {
-    request: { method, url: input.url },
+    request: { method: input.method.toUpperCase(), url: input.url },
     response: {
       status: response.status,
       statusText: response.statusText,
-      ok: response.ok,
-      url: response.url || url.href,
-      redirected,
-      headers: responseHeaders,
+      ok: response.status >= 200 && response.status < 300,
+      url: response.url,
+      redirected: response.redirected,
+      headers: response.headers,
       contentType: contentType || null,
-      bodyBytes: bytes.byteLength,
-      truncated,
+      bodyBytes: response.bodyBytes,
+      truncated: response.truncated,
     },
-    // Web-search-style result fields make fetched pages easy to cite and scan;
-    // body preserves the actual response for API clients and binary content.
     results: content === undefined ? [] : [{
       title,
-      url: response.url || url.href,
+      url: response.url,
       snippet: content.slice(0, 500),
       content: content.slice(0, 20_000),
     }],
     body: decoded ?? null,
-    bodyBase64: content === undefined ? base64(bytes) : null,
+    bodyBase64: content === undefined ? response.bodyBase64 : null,
   };
 }
 
