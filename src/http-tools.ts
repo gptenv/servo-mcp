@@ -19,6 +19,10 @@ const headersSchema = z.record(z.string().min(1).max(256), z.string().max(8192))
   .refine((headers) => Object.keys(headers).length <= MAX_HEADERS, `At most ${MAX_HEADERS} headers are allowed.`);
 
 export const httpRequestSchema = z.object({
+  // Session options mirror the focused browser-action tools.
+  sessionID: z.union([z.string().uuid(), z.literal(null), z.literal(false), z.literal(0), z.literal('')]).optional(),
+  width: z.number().int().min(320).max(1920).optional(),
+  height: z.number().int().min(240).max(1600).optional(),
   url: z.string().url().max(2048),
   method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$/).default('GET'),
   headers: headersSchema.optional(),
