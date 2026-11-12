@@ -40,7 +40,23 @@ create real Servo sessions by default and return their IDs.
 - `servo_recording_start`, `servo_recording_stop`, `servo_recording_status`,
   `servo_recording_download`
 
-The `servo_web_search` tool supports `auto`, `all`, `brave`, `google`, `bing`, `duckduckgo`, and `yandex` providers. It now navigates actual Servo WASM browser sessions to search pages and parses their DOM markup. Each provider uses a separate session; if `sessionID` is supplied the first provider reuses that tab. The result includes a `sessions` object mapping providers to session IDs. Automatic search may start five browsers in parallel and has higher CPU and memory costs than the old Worker-only request adapters. Search engines can change their markup, require JavaScript, or block automated browsing; results are best-effort.
+The `servo_web_search` tool supports `auto`, `all`, `brave`, `google`, `bing`, `duckduckgo`, and `yandex` providers. It navigates actual Servo WASM browser sessions to search pages and parses their DOM markup. Searches accept an `actions` array with one `query`, `provider`, and optional `sessionID` per action. Each search action uses one tab and visits its providers sequentially. Distinct actions run concurrently in their own sessions; the result maps each action index to its resulting session ID. New browser sessions can be more CPU- and memory-intensive than the old Worker-only request adapters. Search engines can change their markup, require JavaScript, or block automated browsing; results are best-effort.
+
+For example, to run two searches in separate browsers, creating a new one
+for the first action and reusing an existing browser for the second:
+
+```json
+{
+  "actions": [
+    {"sessionID": null, "query": "Servo WASM", "provider": "brave"},
+    {"sessionID": "00000000-0000-4000-8000-000000000001", "query": "MCP sessions", "provider": "bing"}
+  ]
+}
+```
+
+Each action's session ID is paired with that same action's arguments, not placed
+in a separate positional array. The response preserves action order and reports
+`actionIndex` and `sessionID` for each operation. `null`, `false`, `0`, `""`, or an omitted `sessionID` creates an independent session.
 
 The HTTP tools send requests via **Servo's in-page `fetch()`**, not Cloudflare's Worker-global `fetch()`. Each HTTP action may contain `sessionID`, `width`, and `height`; omit the ID to create a new Servo browser, or supply an existing one to preserve its cookies and origin. Each result includes the session ID for reuse. New sessions first navigate with GET to the destination **origin root** (for example, `https://api.example.com/`), then invoke the requested method in that browsing context. This bootstrap GET is a real network request. Existing sessions perform the request from their current page origin without navigation.
 
