@@ -690,9 +690,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }
   }
 
-  private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false) {
+  private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false, allowFailure = false) {
     const result = await runtime.restoreResumeState(snapshot, url);
     if (typeof result !== 'object' || result === null || !('restored' in result) || result.restored !== true) {
+      if (allowFailure) return null;
       const action = reapplying ? 'reapply' : 'apply';
       throw new Error(`Servo could not ${action} the saved tab state: ${JSON.stringify(result).slice(0, 512)}`);
     }
@@ -717,7 +718,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const snapshot = this.loadSnapshot(url);
     if (!snapshot) return;
     if (!snapshot.originAssets && !runtime.hasSavedOrigin(snapshot, url)) return;
-    const restored = await this.applySavedState(runtime, snapshot, url);
+    // Soft-fail when the current document cannot accept the saved origin state
+    // (for example an opaque network-error page). The later snapshot capture
+    // will see the opaque document and leave the last usable snapshot intact.
+    const restored = await this.applySavedState(runtime, snapshot, url, false, true);
+    if (!restored) return;
     if (restored.hasStorage || restored.hasCookies || restored.hasIndexedDBState || restored.indexedDatabases) {
       await this.reloadDocument(runtime, {}, 'Servo could not reload after restoring this tab origin.');
       await this.applySavedState(runtime, snapshot, url, true);

@@ -79,6 +79,10 @@ vi.mock('./helpers/servo-worker-adapter.ts', () => ({
 vi.mock('../src/vendor/servo-worker/servo_js_wasm.wasm', () => ({
   default: {},
 }));
+vi.mock('../src/cloudflare-browser', () => ({
+  createCloudflareServoBrowser: (wasm: unknown, _env: unknown, config: Record<string, unknown>) =>
+    createServoWorkerRuntime(wasm, config),
+}));
 vi.mock('../src/recording-encoder', () => ({ encodeRecordingMp4: vi.fn(async () => new Uint8Array([0, 0, 0, 0])) }));
 
 const fetchImplSpy = vi.fn();
