@@ -1055,7 +1055,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch((this.env as Env & { MESH: MeshEgress }).MESH, input, init).then((response) => {
+      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(this.env.MESH, input, init).then((response) => {
         // Network-error documents are not the only failed navigations:
         // 403/429/5xx still produce a document and must fail search providers.
         const requested = input instanceof Request ? input.url : String(input);
@@ -1066,7 +1066,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
         this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
         throw error;
       }),
-      webSocketFactory: (url: string, protocols?: string | string[]) => publicWebSocket((this.env as Env & { MESH: MeshEgress }).MESH, url, protocols),
+      webSocketFactory: (url: string, protocols?: string | string[]) => publicWebSocket(this.env.MESH, url, protocols),
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxSubrequests: 50,
       log: (message: string) => console.error(`[servo:${sessionId}] ${message.slice(0, 2048)}`),
