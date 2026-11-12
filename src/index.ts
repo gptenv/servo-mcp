@@ -236,33 +236,28 @@ function createServer(env: Env, publicOrigin: string) {
     'openai/outputTemplate': SEARCH_WIDGET_URI,
   };
 
+  const searchActionSchema = z.object({
+    sessionID: z.union([z.string().uuid(), z.literal(null), z.literal(false), z.literal(0), z.literal('')]).optional()
+      .describe('Reuse this Servo tab, or omit/use a falsy value to create a new independent tab for this search action.'),
+    width: z.number().int().min(320).max(1920).optional(),
+    height: z.number().int().min(240).max(1600).optional(),
+    query: z.string().trim().min(1).max(512),
+    limit: z.number().int().min(1).max(10).default(8),
+    provider: z.enum(['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
+  }).strict();
+
   server.registerTool('servo_web_search', {
     title: 'Servo web search',
-    description: 'Search the public web by navigating real Servo WASM browser sessions to the selected providers and parsing their loaded documents. Supply sessionID to reuse a tab for the first provider. The response reports provider session IDs, successes and failures.',
-    inputSchema: z.object({
-      query: z.string().trim().min(1).max(512),
-      limit: z.number().int().min(1).max(10).default(8),
-      provider: z.enum(['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
-      sessionID: z.union([z.string().uuid(), z.literal(null), z.literal(false), z.literal(0), z.literal('')]).optional()
-        .describe('Reuse this Servo browser for the first search provider, or omit to create one session per provider.'),
-    }).strict(),
+    description: 'Run multiple web searches in separate Servo WASM browser sessions. Each actions entry has its own query/provider and optional sessionID; omitted or falsy IDs create independent new tabs. Entries run concurrently and return their session IDs. Each provider within one search action runs sequentially in that action tab, preserving browser origin, cookies and navigation state. Results are best-effort.',
+    inputSchema: z.object({ actions: z.array(searchActionSchema).min(1).max(20) }).strict(),
     _meta: searchUiMeta,
-  }, async ({ query, limit, provider, sessionID }) => safely(async () => {
-    if (sessionID) await existingSession(sessionID);
-    const sessions: Record<string, string> = {};
-    let assigned = false;
-    const data = await searchWeb(query, limit, provider, async (url, providerName) => {
-      const reuse = !assigned && sessionID ? sessionID : undefined;
-      assigned = true;
-      const id = reuse || crypto.randomUUID();
-      sessions[providerName] = id;
-      const browser = reuse ? await existingSession(id) : session(id);
-      if (!reuse) await browser.initialize({ sessionId: id, width: 1280, height: 720 });
-      const result = await browser.navigateAndReadHtml(url.href);
-      return result.html;
+  }, async (input) => safely(async () => runSessions(input, async (browser, action) => {
+    const data = await searchWeb(action.query, action.limit, action.provider, async (url) => {
+      const page = await browser.navigateAndReadHtml(url.href);
+      return page.html;
     });
-    return { query, provider, ...data, sessions };
-  }));
+    return { query: action.query, provider: action.provider, ...data };
+  })));
 
   type SessionGroup = { width?: number; height?: number };
   type SessionInput<T extends { sessionID?: unknown }> = { actions: T[] };
