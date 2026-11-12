@@ -714,36 +714,23 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return result as { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number };
   }
 
-  private hasSavedOrigin(snapshot: ResumeSnapshot, url: string): boolean {
-    const origin = new URL(url).origin;
-    return Object.hasOwn(snapshot.localStorageByOrigin ?? {}, origin)
-      || Object.hasOwn(snapshot.sessionStorageByOrigin ?? {}, origin)
-      || Object.hasOwn(snapshot.indexedDBByOrigin ?? {}, origin)
-      || (snapshot.origin ?? new URL(snapshot.url).origin) === origin;
-  }
-
   private inlineDocumentHtml(url: string | null): string | undefined {
     if (!url || new URL(url).origin !== 'https://servo-inline.invalid') return undefined;
     return this.readAsset('initial-html');
   }
 
   private async reloadDocument(runtime: ServoRuntime, readiness: PageReadinessOptions, rejectionMessage: string): Promise<void> {
-    const before = await runtime.navigationIdentity();
-    const html = this.inlineDocumentHtml(before.url);
-    if (html !== undefined && before.url) {
-      await runtime.navigateHtml(html, { url: before.url, readiness });
-      return;
-    }
-    if (!runtime.reload()) throw new Error(rejectionMessage);
-    const committed = await runtime.waitForNavigationCommit(before);
-    if (!committed.committed) throw new Error('Servo reload did not commit a document.');
-    await awaitReady(runtime, readiness);
+    const current = await runtime.navigationIdentity();
+    await runtime.reloadDocument({
+      readiness, rejectionMessage,
+      inlineHtml: this.inlineDocumentHtml(current.url),
+    });
   }
 
   private async restoreNavigatedOrigin(runtime: ServoRuntime, url: string): Promise<void> {
     const snapshot = this.loadSnapshot(url);
     if (!snapshot) return;
-    if (!snapshot.originAssets && !this.hasSavedOrigin(snapshot, url)) return;
+    if (!snapshot.originAssets && !runtime.hasSavedOrigin(snapshot, url)) return;
     const restored = await this.applySavedState(runtime, snapshot, url);
     if (restored.hasStorage || restored.hasCookies || restored.hasIndexedDBState || restored.indexedDatabases) {
       await this.reloadDocument(runtime, {}, 'Servo could not reload after restoring this tab origin.');

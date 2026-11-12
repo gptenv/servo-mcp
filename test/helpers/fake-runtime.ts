@@ -314,6 +314,29 @@ export class FakeServoRuntime {
     };
   }
 
+  hasSavedOrigin(snapshot: any, url: string): boolean {
+    const origin = new URL(url).origin;
+    return Object.hasOwn(snapshot.localStorageByOrigin ?? {}, origin) ||
+      Object.hasOwn(snapshot.sessionStorageByOrigin ?? {}, origin) ||
+      Object.hasOwn(snapshot.indexedDBByOrigin ?? {}, origin) ||
+      (snapshot.origin ?? new URL(snapshot.url).origin) === origin;
+  }
+
+  async reloadDocument({ readiness = {}, inlineHtml, rejectionMessage = 'Servo rejected document reload.' }: {
+    readiness?: unknown; inlineHtml?: string; rejectionMessage?: string;
+  } = {}): Promise<void> {
+    const before = await this.navigationIdentity();
+    if (inlineHtml !== undefined && before.url) {
+      await this.navigateHtml(inlineHtml, { url: before.url, readiness });
+      return;
+    }
+    if (!this.reload()) throw new Error(rejectionMessage);
+    const committed = await this.waitForNavigationCommit(before);
+    if (!committed.committed) throw new Error('Servo reload did not commit a document.');
+    const ready = await this.waitForPageReady(readiness);
+    if (!ready.ready) throw new Error('Servo document readiness timed out after reload.');
+  }
+
   async restoreResumeState(snapshot: unknown, url = (snapshot as { url: string }).url): Promise<unknown> {
     return FakeServoRuntime.decodeBrowserValue(await this.evaluate(applyResumeState(FakeServoRuntime.selectResumeStateForOrigin(snapshot, url))));
   }
