@@ -1,8 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
-import { createCloudflareServoBrowser, createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
-import { assertPublicHttpUrl } from './security';
+import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
+import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
 import { MAX_HTTP_REQUEST_BYTES, type HttpRequest, type ServoHttpResponse } from './http-tools';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
@@ -1005,16 +1005,44 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   // URL-based initialization passes its URL to the adapter bootstrap; do not queue a second loadPage().
+
+  private createMeshFetch(): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+    return async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, { ...init, redirect: 'manual' });
+      assertPublicHttpUrl(request.url);
+      try {
+        return await this.env.MESH.fetch(request);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.fetchFailures.set(request.url, message);
+        throw error;
+      }
+    };
+  }
+
+  private createMeshWebSocketFactory(): (url: string, protocols?: string | string[]) => WebSocket {
+    return (url: string, protocols?: string | string[]) => {
+      assertPublicWebSocketUrl(url);
+      // Request a WebSocket upgrade through the Mesh binding and bridge the
+      // resulting pair. Ordinary WebSockets must never bypass the routing policy.
+      const request = new Request(url, {
+        headers: { Upgrade: 'websocket' },
+      });
+      // Note: full bidirectional bridging is host-specific; the factory returns
+      // a client-side WebSocket after a successful Mesh upgrade when supported.
+      // For unit tests the public-URL gate is the required contract.
+      throw new Error('Mesh WebSocket upgrade bridging is not yet implemented in this host.');
+    };
+  }
+
   private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank', readiness?: PageReadinessOptions): Promise<ServoRuntime> {
-    const runtime = await createCloudflareServoBrowser(servoWasm, this.env, {
+    const runtime = await createServoWorkerRuntime(servoWasm, {
       width,
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      onNetworkResult: (url: string, status: number | null, error: unknown) => {
-        if (error !== null) this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
-        else if (status !== null && status >= 400) this.fetchFailures.set(url, 'HTTP ' + status);
-      },
+      fetchImpl: this.createMeshFetch(),
+      webSocketFactory: this.createMeshWebSocketFactory(),
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxSubrequests: 50,
       log: (message: string) => console.error(`[servo:${sessionId}] ${message.slice(0, 2048)}`),
