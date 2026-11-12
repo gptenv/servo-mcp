@@ -3,6 +3,7 @@ import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
 import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
 import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
+import type { HttpRequest, ServoHttpResponse } from './http-tools';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
@@ -1296,6 +1297,50 @@ export class ServoBrowserSession extends DurableObject<Env> {
       await runtime.navigateHtml(html, { readiness });
       await this.storeAsset('initial-html', html);
       return { action: 'navigate', page: await this.summary(runtime) };
+    });
+  }
+
+  /**
+   * Run HTTP requests inside the current Servo browsing context, preserving
+   * Servo's cookie jar, origin, redirect behavior, and CORS enforcement.
+   */
+  async requestHttp(input: HttpRequest): Promise<ServoHttpResponse> {
+    const url = assertPublicHttpUrl(input.url).href;
+    const method = input.method.toUpperCase();
+    if (/^(?:CONNECT|TRACE|TRACK)$/.test(method)) throw new TypeError(method + ' is forbidden by the Fetch API.');
+    if (input.body !== undefined && (method === 'GET' || method === 'HEAD')) {
+      throw new TypeError(method + ' requests cannot include a body.');
+    }
+    const request = JSON.stringify({
+      url, method, headers: input.headers ?? {}, body: input.body,
+      followRedirects: input.followRedirects, maxResponseBytes: input.maxResponseBytes,
+      maxDurationMs: input.maxDurationMs,
+    });
+    const script = "(async () => {\n  const request = __REQUEST_DATA__;\n  const controller = new AbortController();\n  const timer = setTimeout(() => controller.abort(), request.maxDurationMs);\n  try {\n    const response = await fetch(request.url, {\n      method: request.method, headers: request.headers,\n      ...(request.body === undefined ? {} : { body: request.body }),\n      redirect: request.followRedirects ? 'follow' : 'manual',\n      signal: controller.signal,\n    });\n    const chunks = [];\n    let size = 0;\n    let truncated = false;\n    if (request.method !== 'HEAD' && response.body) {\n      const reader = response.body.getReader();\n      try {\n        while (true) {\n          const next = await reader.read();\n          if (next.done) break;\n          const remaining = request.maxResponseBytes - size;\n          if (next.value.byteLength > remaining) {\n            if (remaining > 0) chunks.push(next.value.subarray(0, remaining));\n            size += Math.max(0, remaining);\n            truncated = true;\n            await reader.cancel('Response body limit reached');\n            break;\n          }\n          chunks.push(next.value);\n          size += next.value.byteLength;\n        }\n      } finally {\n        reader.releaseLock();\n      }\n    }\n    let binary = '';\n    for (const chunk of chunks) {\n      for (let i = 0; i < chunk.byteLength; i += 0x8000) {\n        binary += String.fromCharCode(...chunk.subarray(i, i + 0x8000));\n      }\n    }\n    return JSON.stringify({\n      status: response.status, statusText: response.statusText,\n      url: response.url, redirected: response.redirected,\n      headers: Object.fromEntries(response.headers.entries()),\n      bodyBase64: btoa(binary), bodyBytes: size, truncated,\n    });\n  } finally {\n    clearTimeout(timer);\n  }\n})()".replace('__REQUEST_DATA__', request);
+    return this.operate(async (runtime) => {
+      const result = parseEvaluationResult(await runtime.evaluate(script, {
+        maxDurationMs: Math.min(30_000, input.maxDurationMs + 1_000),
+      }));
+      if (typeof result !== 'object' || result === null || !('status' in result)
+          || typeof result.status !== 'number' || !('bodyBase64' in result)
+          || typeof result.bodyBase64 !== 'string') {
+        throw new Error('Servo did not return a valid HTTP response. This may be a CORS or network failure: '
+          + JSON.stringify(result).slice(0, 1024));
+      }
+      return result as ServoHttpResponse;
+    });
+  }
+
+  /** Load a search result page in Servo, then read the resulting DOM markup. */
+  async navigateAndReadHtml(url: string): Promise<{ html: string; page: PageSummary }> {
+    assertPublicHttpUrl(url);
+    return this.operate(async (runtime) => {
+      await runtime.navigate(url);
+      const html = parseEvaluationResult(await runtime.evaluate(
+        "JSON.stringify(document.documentElement?.outerHTML ?? '')",
+      ));
+      if (typeof html !== 'string') throw new Error('Servo did not return the document HTML.');
+      return { html, page: await this.summary(runtime) };
     });
   }
 
