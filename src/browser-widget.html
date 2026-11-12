@@ -239,6 +239,16 @@
   }
   function renderHttp(responses) {
     httpResponses = responses;
+    // If a request created an implicit tab, use the returned browser session
+    // for later edits and resends. Preserve an explicitly falsy sessionID:
+    // callers who chose null/false/0/"" requested a fresh tab on each call.
+    for (const entry of responses) {
+      const action = httpActions[entry.actionIndex];
+      if (entry.ok && typeof entry.sessionID === 'string' && action &&
+          !Object.prototype.hasOwnProperty.call(action, 'sessionID')) {
+        httpActions[entry.actionIndex] = { ...action, sessionID: entry.sessionID };
+      }
+    }
     const state = { responses, actions: httpActions, shots: httpShots };
     if (sameToolValue(renderedHttp, state)) return;
     renderedHttp = state;
@@ -265,6 +275,11 @@
       const input = httpActions[entry.actionIndex];
       const request = payload?.request ?? entry.request ?? input;
       section.append(heading);
+      if (typeof entry.sessionID === 'string' && entry.sessionID) {
+        const sessionLabel = document.createElement('p');
+        sessionLabel.textContent = 'Servo session: ' + entry.sessionID;
+        section.append(sessionLabel);
+      }
       if (request?.url) {
         section.append(requestField('Request URL', request.url, 'url'));
         if (request.method) section.append(requestField('Method', request.method, 'method'));
