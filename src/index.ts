@@ -9,8 +9,8 @@ import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, httpPreviewHtml, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser-v4.html';
-const HTTP_WIDGET_URI = 'ui://servo/http-v3.html';
-const SEARCH_WIDGET_URI = 'ui://servo/search-v4.html';
+const HTTP_WIDGET_URI = 'ui://servo/http-v4.html';
+const SEARCH_WIDGET_URI = 'ui://servo/search-v5.html';
 const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
@@ -191,6 +191,7 @@ function createServer(env: Env, publicOrigin: string) {
     ['servo-browser-ui-v3', 'ui://servo/browser-v3.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-v2', 'ui://servo/browser-v2.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-original', 'ui://servo/browser.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-http-ui-v3', 'ui://servo/http-v3.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui-v2', 'ui://servo/http-v2.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui-v1', 'ui://servo/http-v1.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui', HTTP_WIDGET_URI, 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
@@ -205,7 +206,7 @@ function createServer(env: Env, publicOrigin: string) {
     }] }));
   }
 
-  for (const [name, uri] of [['servo-web-search-ui', SEARCH_WIDGET_URI], ['servo-web-search-ui-v3', 'ui://servo/search-v3.html']]) {
+  for (const [name, uri] of [['servo-web-search-ui', SEARCH_WIDGET_URI], ['servo-web-search-ui-v4', 'ui://servo/search-v4.html'], ['servo-web-search-ui-v3', 'ui://servo/search-v3.html']]) {
     server.registerResource(name, uri, {
       title: 'Servo web search',
       description: 'Search the public web and inspect ranked results.',
