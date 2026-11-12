@@ -2,7 +2,6 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
 import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
-// @ts-expect-error New factory is provided by Servo-WASM PR #10, not yet its main-branch artifact.
 import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
 import { assertPublicHttpUrl } from './security';
 import { type HttpRequest, type ServoHttpResponse } from './http-tools';
