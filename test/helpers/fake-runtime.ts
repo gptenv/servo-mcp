@@ -79,8 +79,8 @@ export class FakeServoRuntime {
     const name = Object.keys(input.headers ?? {}).find(h =>
       /^(authorization|proxy-authorization|cookie|cookie2|x-api-key|x-auth-token|x-access-token)$/i.test(h));
     if (name) throw new TypeError('Page-script HTTP cannot carry ' + name + ': page JavaScript could intercept it');
-    const script = '(async () => {\\n  const request = ' + JSON.stringify(input)
-      + ';\\n  return fetch(request.url); })()';
+    const script = '(async () => {\n  const request = ' + JSON.stringify(input)
+      + ';\n  return fetch(request.url); })()';
     const value: any = await this.evaluate(script, { maxDurationMs: input.maxDurationMs + 1000 });
     if (typeof value?.Ok?.String !== 'string') throw new Error('Invalid Servo HTTP response fixture');
     return JSON.parse(value.Ok.String);
