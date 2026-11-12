@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
 import { createServoWorkerRuntime, renderOfflineHtmlPreview } from './vendor/servo-worker/worker-adapter.mjs';
-import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
+import { createCloudflareServoBrowser, planServoRecordingCapture, planServoRecordingFinalization } from './vendor/servo-worker/worker-adapter.mjs';
 import { assertPublicHttpUrl } from './security';
 import { type HttpRequest, type ServoHttpResponse } from './http-tools';
 
@@ -410,16 +410,12 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async beginRecordingEncoding(recording: RecordingRow, stoppedAt = Date.now()): Promise<void> {
     if (recording.status !== 'recording') return;
-    const end = Math.min(stoppedAt, recording.started_at + recording.max_duration_ms);
-    const elapsed = Math.max(1, end - recording.started_at);
     const lastSlot = this.ctx.storage.sql.exec<{ slot_index: number | null }>(
       'SELECT MAX(slot_index) AS slot_index FROM browser_recording_frame WHERE recording_id = ?', recording.id,
     ).toArray()[0]?.slot_index;
-    const targetFrames = Math.min(recording.max_frames, Math.max(
-      1,
-      Math.ceil(elapsed * recording.fps / 1000),
-      typeof lastSlot === 'number' ? lastSlot + 1 : 0,
-    ));
+    const plan = planServoRecordingFinalization(recording, stoppedAt, lastSlot);
+    if (!plan) return;
+    const { end, targetFrames } = plan;
     this.ctx.storage.sql.exec(
       "UPDATE browser_recording SET status = 'encoding', stopped_at = ?, target_frames = ?, expires_at = ?, error = NULL WHERE id = ? AND status = 'recording'",
       end, targetFrames, Date.now() + RECORDING_RETENTION_MS, recording.id,
@@ -432,19 +428,16 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const recording = this.recording(recordingId);
     if (!recording || recording.status !== 'recording') return;
     const now = Date.now();
-    const deadline = recording.started_at + recording.max_duration_ms;
-    if (!initial && now >= deadline) {
-      await this.beginRecordingEncoding(recording, deadline);
-      return;
-    }
-    const slot = initial ? 0 : Math.min(
-      recording.max_frames - 1,
-      Math.floor((now - recording.started_at) * recording.fps / 1000),
-    );
     const lastSlot = this.ctx.storage.sql.exec<{ slot_index: number | null }>(
       'SELECT MAX(slot_index) AS slot_index FROM browser_recording_frame WHERE recording_id = ?', recordingId,
     ).toArray()[0]?.slot_index;
-    if (typeof lastSlot === 'number' && slot <= lastSlot) return;
+    const plan = planServoRecordingCapture(recording, now, initial, lastSlot);
+    if (plan.action === 'finish') {
+      await this.beginRecordingEncoding(recording, plan.stoppedAt);
+      return;
+    }
+    if (plan.action !== 'capture') return;
+    const { slot, deadline } = plan;
 
     try {
       const runtime = await this.requireRuntime();

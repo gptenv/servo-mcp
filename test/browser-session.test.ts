@@ -45,7 +45,23 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   createdRuntimes.push(runtime);
   return runtime;
 });
+const recordingPlanCaptureSpy = vi.fn((recording: { status: string; started_at: number; max_duration_ms: number; max_frames: number; fps: number }, now: number, initial = false, lastSlot: number | null = null) => {
+  if (recording.status !== 'recording') return { action: 'skip' };
+  const deadline = recording.started_at + recording.max_duration_ms;
+  if (!initial && now >= deadline) return { action: 'finish', stoppedAt: deadline };
+  const slot = initial ? 0 : Math.min(recording.max_frames - 1, Math.floor((now - recording.started_at) * recording.fps / 1000));
+  if (lastSlot !== null && slot <= lastSlot) return { action: 'skip' };
+  return { action: 'capture', slot, deadline };
+});
+const recordingPlanFinalizationSpy = vi.fn((recording: { status: string; started_at: number; max_duration_ms: number; max_frames: number; fps: number }, stoppedAt: number, lastSlot: number | null = null) => {
+  if (recording.status !== 'recording') return null;
+  const end = Math.min(stoppedAt, recording.started_at + recording.max_duration_ms);
+  const elapsed = Math.max(1, end - recording.started_at);
+  return { end, targetFrames: Math.min(recording.max_frames, Math.max(1, Math.ceil(elapsed * recording.fps / 1000), typeof lastSlot === 'number' ? lastSlot + 1 : 0)) };
+});
 vi.mock('./helpers/servo-worker-adapter.ts', () => ({
+  planServoRecordingCapture: recordingPlanCaptureSpy,
+  planServoRecordingFinalization: recordingPlanFinalizationSpy,
   createServoWorkerRuntime,
   renderOfflineHtmlPreview: async (wasm: unknown, _html: string) => {
     const url = 'https://servo-http-preview.invalid/';

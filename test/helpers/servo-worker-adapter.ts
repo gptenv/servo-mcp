@@ -9,3 +9,10 @@ export async function createCloudflareServoBrowser(): Promise<never> {
 export async function renderOfflineHtmlPreview(): Promise<never> {
   throw new Error('Real offline preview is not used by MCP unit tests.');
 }
+
+export function planServoRecordingCapture(): never {
+  throw new Error('Real recording planning is not used by MCP unit tests.');
+}
+export function planServoRecordingFinalization(): never {
+  throw new Error('Real recording planning is not used by MCP unit tests.');
+}
