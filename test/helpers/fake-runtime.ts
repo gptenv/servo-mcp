@@ -314,6 +314,32 @@ export class FakeServoRuntime {
     };
   }
 
+  async restoreBrowserTab({ snapshot, url = snapshot.url, inlineHtml }: {
+    snapshot: any; url?: string; inlineHtml?: string;
+  }): Promise<{ restored: true; url: string }> {
+    const blank = url === 'about:blank';
+    const inline = inlineHtml !== undefined;
+    const loaded = blank || (inline ? this.loadHtml(inlineHtml, { url }) : this.loadPage(url));
+    if (!loaded) throw new Error('Servo could not reopen the saved tab URL.');
+    let restored: any;
+    if (!blank) {
+      const commit = await this.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
+      if (!commit.committed) throw new Error('Saved document navigation did not commit.');
+      const ready = await this.waitForPageReady({});
+      if (!ready.ready) throw new Error('Saved browser document did not become ready.');
+      restored = await this.restoreResumeState(snapshot, url);
+      await this.pumpCooperatively();
+    }
+    if (!inline && !blank && (restored?.hasStorage || restored?.hasCookies ||
+        restored?.hasIndexedDBState || restored?.indexedDatabases)) {
+      if (!this.reload()) throw new Error('Servo could not reload the restored tab.');
+      await this.pumpCooperatively();
+      await this.restoreResumeState(snapshot, url);
+      await this.pumpCooperatively();
+    }
+    return { restored: true, url };
+  }
+
   hasSavedOrigin(snapshot: any, url: string): boolean {
     const origin = new URL(url).origin;
     return Object.hasOwn(snapshot.localStorageByOrigin ?? {}, origin) ||

@@ -20,6 +20,7 @@ describe('Servo-MCP / Servo-WASM implementation boundary', () => {
     expect(source).toContain('runtime.documentHtml(');
     expect(source).toContain('runtime.pageSummary()');
     expect(source).toContain('runtime.reloadDocument(');
+    expect(source).toContain('runtime.restoreBrowserTab(');
     expect(source).toContain('runtime.hasSavedOrigin(');
     expect(source).not.toContain('resumeStateExpression');
     expect(source).not.toContain('applyResumeState');

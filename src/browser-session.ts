@@ -774,28 +774,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
     if (!snapshot) throw new Error('Browser session has no saved tab state to restore.');
     const runtime = await this.createRuntime(row.width, row.height, this.sessionId(), snapshot.cookieState);
     try {
-      const initialHtml = this.inlineDocumentHtml(snapshot.url);
-      const isInlineDocument = initialHtml !== undefined;
-      const isBlankDocument = snapshot.url === 'about:blank';
-      const url = isBlankDocument ? snapshot.url : isInlineDocument ? snapshot.url : assertPublicHttpUrl(snapshot.url).href;
-      const loaded = isBlankDocument || (isInlineDocument
-        ? runtime.loadHtml(initialHtml, { url })
-        : runtime.loadPage(url));
-      if (!loaded) throw new Error('Servo could not reopen the saved tab URL.');
-      let restored: { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number } | undefined;
-      if (!isBlankDocument) {
-        const commit = await runtime.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
-        if (!commit.committed) throw new Error('Saved document navigation did not commit.');
-        await awaitReady(runtime);
-        restored = await this.applySavedState(runtime, snapshot, snapshot.url);
-      }
-      // Give restored storage and script-visible cookies a chance to initialize
-      // the re-opened page, as a browser does when restoring a tab profile.
-      if (!isInlineDocument && !isBlankDocument && (restored?.hasStorage || restored?.hasCookies || restored?.hasIndexedDBState || restored?.indexedDatabases)) {
-        if (!runtime.reload()) throw new Error('Servo could not reload the restored tab.');
-        await pump(runtime);
-        await this.applySavedState(runtime, snapshot, snapshot.url, true);
-      }
+      const inlineHtml = this.inlineDocumentHtml(snapshot.url);
+      const url = inlineHtml !== undefined || snapshot.url === 'about:blank'
+        ? snapshot.url
+        : assertPublicHttpUrl(snapshot.url).href;
+      await runtime.restoreBrowserTab({ snapshot, url, inlineHtml });
       await this.storageProbe(runtime, true);
       this.runtime = runtime;
       return runtime;
