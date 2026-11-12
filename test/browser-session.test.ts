@@ -915,7 +915,7 @@ describe('operate lifecycle', () => {
     const result = await session.navigateAndReadHtml('https://public.example/search?q=hello');
     expect(result.html).toBe(html);
     const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
-    expect(runtime.calls).toContain('navigate:https://public.example/search?q=hello');
+    expect(runtime.calls).toContain('loadPage:https://public.example/search?q=hello');
     expect(runtime.evaluations.some((entry) => entry.script.includes('document.documentElement?.outerHTML'))).toBe(true);
   });
 
