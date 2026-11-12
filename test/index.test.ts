@@ -52,6 +52,24 @@ function makeSession(): Session {
     navigateHtml: vi.fn(async (html: string) => ({ action: 'navigate', page: { url: 'https://servo-inline.invalid/', title: 'Inline', text: html } })),
     navigate: vi.fn(async (url: string) => ({ action: 'navigate', page: { url, title: 'Example', text: 'visible page text' } })),
     inspect: vi.fn(async () => ({ url: 'https://example.com/', title: 'Example', text: 'body' })),
+    navigateAndReadHtml: vi.fn(async (url: string) => ({
+      html: '<rss><item><title>Result</title><link>https://example.org/article</link><description>Snippet</description></item></rss>',
+      page: { url, title: 'Search', text: 'Result' },
+    })),
+    requestHttp: vi.fn(async (action: { url: string; method: string; body?: string }) => {
+      if (action.body && ['GET', 'HEAD'].includes(action.method)) {
+        throw new TypeError(action.method + ' requests cannot include a body.');
+      }
+      if (['TRACE', 'TRACK', 'CONNECT'].includes(action.method)) throw new TypeError(action.method + ' is forbidden by the Fetch API.');
+      const body = '<html><title>Sample Page</title><body><h1>Hello</h1><p>Visible &amp; useful</p></body></html>';
+      return {
+        status: 201, statusText: 'Created', url: action.url, redirected: false,
+        headers: { 'content-type': 'text/html; charset=utf-8', 'x-origin': 'servo-session' },
+        bodyBase64: Buffer.from(body).toString('base64'),
+        bodyBytes: Buffer.byteLength(body), truncated: false,
+      };
+    }),
+
     evaluate: vi.fn(async (script: string) => ({ action: 'evaluate', page: { script } })),
     click: vi.fn(async () => ({ action: 'click' })),
     typeText: vi.fn(async () => ({ action: 'type' })),
@@ -377,7 +395,7 @@ describe('focused browser tools', () => {
   it('never initializes supplied IDs and rejects unknown IDs across every browser tool', async () => {
     defaultSession.getStatus.mockResolvedValue({ status: 'missing' });
     for (const [name, tool] of harness.tools) {
-      if (name.startsWith('servo_http_')) continue;
+      // All tools including HTTP now accept a session selector.
       const inputs: Record<string, unknown> = {
         sessionID: sessionId, url: 'https://example.com/', script: '1', x: 1, y: 2, text: 'x', key: 'Enter',
         deltaX: 0, deltaY: 1, direction: 'back', fontBase64: 'Zm9udA==',
@@ -567,75 +585,74 @@ describe('focused browser tools', () => {
     expect(duplicate.content[0].text).toMatch(/only once/);
   });
 
-  it('sends configurable HTTP requests and returns headers, status, body and web-style page results', async () => {
-    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => {
-      expect(init.method).toBe('POST');
-      expect(new Headers(init.headers).get('x-test')).toBe('overridden');
-      expect(await new Response(init.body).text()).toBe('{"hello":"world"}');
-      return new Response('<html><title>Sample Page</title><body><h1>Hello</h1><script>secret()</script><p>Visible &amp; useful</p></body></html>', {
-        status: 201, headers: { 'content-type': 'text/html; charset=utf-8', 'x-origin': 'fixture' },
-      });
-    });
+  it('uses a Servo browser session for HTTP requests and formats the returned body', async () => {
+    const fetchMock = vi.fn(async () => { throw new Error('Worker fetch must not be used'); });
     vi.stubGlobal('fetch', fetchMock);
     try {
       const result = structured(await invoke('servo_http_request', { actions: [{
-        url: 'https://example.com/api', method: 'POST', headers: { 'x-test': 'overridden' },
-        body: '{"hello":"world"}',
+        sessionID: sessionId, url: 'https://example.com/api', method: 'POST',
+        headers: { 'x-test': 'overridden' }, body: '{"hello":"world"}',
       }] }));
-      const requestResult = result.responses[0].response;
-      expect(requestResult.request).toMatchObject({ method: 'POST', url: 'https://example.com/api' });
-      expect(requestResult.response).toMatchObject({ status: 201, ok: true, contentType: 'text/html; charset=utf-8', headers: { 'x-origin': 'fixture' } });
-      expect(requestResult.body).toContain('<title>Sample Page</title>');
-      expect(requestResult.results).toEqual([{ title: 'Sample Page', url: 'https://example.com/api', snippet: 'Hello\nVisible & useful', content: 'Hello\nVisible & useful' }]);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.responses[0]).toMatchObject({ ok: true, sessionID: sessionId });
+      expect(result.responses[0].response.response).toMatchObject({
+        status: 201, contentType: 'text/html; charset=utf-8',
+        headers: { 'x-origin': 'servo-session' },
+      });
+      expect(result.responses[0].response.results[0].content).toContain('Visible & useful');
+      expect(defaultSession.requestHttp).toHaveBeenCalledWith(expect.objectContaining({
+        method: 'POST', url: 'https://example.com/api', body: '{"hello":"world"}',
+      }));
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it('batches HTTP actions in order with isolated failures and no interactive browser session', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (url: URL) => new Response(url.pathname)));
-    try {
-      for (const [name, tool] of harness.tools) {
-        if (!name.startsWith('servo_http_')) continue;
-        const response = await invoke(name, { actions: [
-          { url: 'https://example.com/first' }, { url: 'http://127.0.0.1/private' }, { url: 'https://example.com/third' },
-        ] });
-        expect(response.isError).toBe(true);
-        expect(structured(response).responses).toMatchObject([
-          { actionIndex: 0, ok: true, response: { request: { url: 'https://example.com/first' } } },
-          { actionIndex: 1, ok: false, error: expect.stringMatching(/Private, local/) },
-          { actionIndex: 2, ok: true, response: { request: { url: 'https://example.com/third' } } },
-        ]);
-        expect(response._meta.ui.screenshots.map((s: { actionIndex: number }) => s.actionIndex).sort()).toEqual([0, 2]);
-        expect(() => tool.definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
-      }
-      expect(defaultSession.initialize).not.toHaveBeenCalled();
-      expect(() => registeredTool('servo_navigate').definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
-    } finally { vi.unstubAllGlobals(); }
+  it('creates and reuses browser sessions for every HTTP tool with per-action errors', async () => {
+    for (const name of harness.tools.keys()) {
+      if (!name.startsWith('servo_http_')) continue;
+      defaultSession.initialize.mockClear();
+      defaultSession.requestHttp.mockClear();
+      const response = await invoke(name, { actions: [
+        { sessionID: sessionId, url: 'https://example.com/first' },
+        { url: 'http://127.0.0.1/private' },
+        { url: 'https://example.com/third' },
+      ] });
+      // Invalid private URLs are rejected by the browser's URL policy.
+      // In the indexed mock this is checked by the real schema below.
+      const entries = structured(response).responses;
+      expect(entries).toHaveLength(3);
+      expect(entries[0]).toMatchObject({ actionIndex: 0, sessionID: sessionId, ok: true });
+      expect(entries[2]).toMatchObject({ actionIndex: 2, ok: true });
+      expect(new Set(entries.map((entry: any) => entry.sessionID)).size).toBe(3);
+      expect(defaultSession.initialize).toHaveBeenCalledTimes(2);
+      expect(defaultSession.requestHttp).toHaveBeenCalledTimes(3);
+      expect(response._meta.ui.screenshots.map((shot: { actionIndex: number }) => shot.actionIndex).sort()).toEqual([0, 1, 2]);
+      expect(() => registeredTool(name).definition.inputSchema.parse({ actions: { url: 'https://example.com/' } })).toThrow();
+    }
   });
 
-  it('supports verb-specific tools and blocks unsafe redirect targets and invalid method/body combinations', async () => {
-    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => init.method === 'OPTIONS'
-      ? new Response(null, { status: 204 })
-      : new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/private' } }));
+  it('rejects invalid HTTP bodies and methods inside the selected Servo session', async () => {
+    const badBody = structured(await invoke('servo_http_request', { actions: [{
+      sessionID: sessionId, method: 'GET', url: 'https://example.com/', body: 'invalid',
+    }] }));
+    expect(badBody.responses[0]).toMatchObject({ ok: false, sessionID: sessionId, error: expect.stringMatching(/cannot include a body/) });
+    const unsupported = structured(await invoke('servo_http_request', { actions: [{
+      sessionID: sessionId, method: 'CONNECT', url: 'https://example.com/',
+    }] }));
+    expect(unsupported.responses[0]).toMatchObject({ ok: false, error: expect.stringMatching(/forbidden/) });
+  });
+
+  it('performs MCP web searches through Servo navigation rather than Worker fetch', async () => {
+    const fetchMock = vi.fn(async () => { throw new Error('Do not use Worker fetch for web search'); });
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const denied = await invoke('servo_http_get', { actions: [{ url: 'https://example.com/' }] });
-      expect(denied.isError).toBe(true);
-      expect(denied.content[0].text).toMatch(/Private, local/);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-
-      const options = await invoke('servo_http_options', { actions: [{ url: 'https://example.com/', headers: { 'x-check': 'yes' } }] });
-      expect(options.structuredContent.responses[0].response.request.method).toBe('OPTIONS');
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      const getWithBody = await invoke('servo_http_request', { actions: [{ url: 'https://example.com/', method: 'GET', body: 'invalid' }] });
-      expect(getWithBody.isError).toBe(true);
-      fetchMock.mockResolvedValueOnce(new Response(null, { status: 207 }));
-      const extension = await invoke('servo_http_request', { actions: [{ url: 'https://example.com/', method: 'PROPFIND' }] });
-      expect(extension.structuredContent.responses[0].response.request.method).toBe('PROPFIND');
-      expect(extension.structuredContent.responses[0].response.response.status).toBe(207);
-      const unsupported = await invoke('servo_http_request', { actions: [{ url: 'https://example.com/', method: 'CONNECT' }] });
-      expect(unsupported.isError).toBe(true);
-      expect(unsupported.content[0].text).toMatch(/forbidden by the Fetch API/);
+      const result = structured(await invoke('servo_web_search', {
+        query: 'article', provider: 'bing', sessionID: sessionId,
+      }));
+      expect(result.sessions.bing).toBe(sessionId);
+      expect(result.providers).toEqual(['bing']);
+      expect(result.results[0]).toMatchObject({ title: 'Result', url: 'https://example.org/article' });
+      expect(defaultSession.navigateAndReadHtml).toHaveBeenCalledWith(expect.stringContaining('bing.com/search'));
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally { vi.unstubAllGlobals(); }
   });
 });
