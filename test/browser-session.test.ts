@@ -879,6 +879,46 @@ describe('operate lifecycle', () => {
     await expect(session.reload()).rejects.toThrow(/could not reload the current page/);
   });
 
+  it('executes HTTP calls in the Servo page runtime instead of Worker fetch', async () => {
+    const body = Buffer.from('{"answer":42}').toString('base64');
+    const session = await activeSession({ evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      '(async () => {\n  const request = ': okString({
+        status: 200, statusText: 'OK', url: 'https://public.example/api',
+        redirected: false, headers: { 'content-type': 'application/json' },
+        bodyBase64: body, bodyBytes: 13, truncated: false,
+      }),
+    } });
+    const result = await session.requestHttp({
+      url: 'https://public.example/api', method: 'POST',
+      headers: { Authorization: 'Bearer fixture-only' }, body: '{"hello":true}',
+      followRedirects: true, maxResponseBytes: 1024, maxDurationMs: 10000,
+    });
+    expect(result).toMatchObject({ status: 200, url: 'https://public.example/api', bodyBase64: body });
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const script = runtime.evaluations.find((entry) => entry.script.startsWith('(async () => {\n  const request = '))?.script;
+    expect(script).toContain('fetch(request.url');
+    expect(script).toContain('"method":"POST"');
+    expect(fetchImplSpy).not.toHaveBeenCalled();
+    await expect(session.requestHttp({
+      url: 'http://127.0.0.1/', method: 'GET', followRedirects: true,
+      maxResponseBytes: 10, maxDurationMs: 5000,
+    })).rejects.toThrow(/Private, local/);
+  });
+
+  it('navigates and extracts DOM markup through a Servo session for search', async () => {
+    const html = '<html><body><h1>Search result</h1></body></html>';
+    const session = await activeSession({ evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      "JSON.stringify(document.documentElement?.outerHTML ?? '')": okString(JSON.stringify(html)),
+    } });
+    const result = await session.navigateAndReadHtml('https://public.example/search?q=hello');
+    expect(result.html).toBe(html);
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    expect(runtime.calls).toContain('navigate:https://public.example/search?q=hello');
+    expect(runtime.evaluations.some((entry) => entry.script.includes('document.documentElement?.outerHTML'))).toBe(true);
+  });
+
   it('evaluates scripts and parses WebDriver-style results', async () => {
     const session = await activeSession({ evaluations: { 'document.title': okString('"served"') } });
     const result = await session.evaluate('document.title');
