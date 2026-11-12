@@ -138,6 +138,15 @@ jobs:
         working-directory: servo-wasm-source/ports/servo-js-wasm
         run: npm test
 
+      - name: Verify browser API required by Servo MCP
+        working-directory: servo-wasm-source/ports/servo-js-wasm
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { createCloudflareServoBrowser } from './worker-adapter.mjs';
+          assert.equal(typeof createCloudflareServoBrowser, 'function', 'Servo MCP requires the Cloudflare browser factory');
+          JS
+
       - name: Assemble and verify the deployment package
         working-directory: servo-wasm-source/ports/servo-js-wasm
         shell: bash
