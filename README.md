@@ -277,3 +277,8 @@ Servo-MCP to production.
 Page summaries and document HTML extraction are handled by Servo-WASM's
 `pageSummary()` and `documentHtml()` runtime APIs. MCP supplies session
 routing and response envelopes, not the browser DOM extraction expressions.
+
+Browser state capture, state application, and page storage probes now call the
+Servo-WASM runtime APIs instead of constructing browser DOM/IndexedDB scripts
+in the MCP session class. Durable Object persistence and recording storage
+still require a separate ownership migration.
