@@ -200,22 +200,44 @@ describe('runtime configuration wiring', () => {
     expect(String(longCall![0])).toBe(`[servo:logged-session] ${'x'.repeat(2048)}`);
   });
 
-  it('routes host fetches through the public-URL policy with manual redirects', async () => {
+  it('routes host fetches through Mesh while preserving Request data and manual redirects', async () => {
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await session.initialize(initOptions());
-    const fetchImpl = runtimeConfigs[0].fetchImpl as (input: Request | string) => Promise<Response>;
-    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
-      fetchImplSpy(init);
+    const fetchImpl = runtimeConfigs[0].fetchImpl as (input: Request | string, init?: RequestInit) => Promise<Response>;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchImplSpy(input, init);
       return { status: 200 } as Response;
     }));
-    const requestResponse = await fetchImpl(new Request('https://public.example/request'));
-    expect(requestResponse.status).toBe(200);
-    expect(fetchImplSpy.mock.calls[0][0]).toEqual({ redirect: 'manual' });
+
+    const original = new Request('https://public.example/request', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'text/plain' },
+      body: 'original payload',
+      credentials: 'include',
+      redirect: 'follow',
+    });
+    expect((await fetchImpl(original)).status).toBe(200);
+    const forwarded = fetchImplSpy.mock.calls[0][0] as Request;
+    expect(forwarded).toBeInstanceOf(Request);
+    expect(forwarded.method).toBe('POST');
+    expect(forwarded.headers.get('Authorization')).toBe('Bearer test-token');
+    expect(forwarded.headers.get('Content-Type')).toBe('text/plain');
+    expect(forwarded.credentials).toBe('include');
+    expect(forwarded.redirect).toBe('manual');
+    expect(await forwarded.text()).toBe('original payload');
+    expect(fetchImplSpy.mock.calls[0][1]).toBeUndefined();
+
     fetchImplSpy.mockClear();
-    const response = await fetchImpl('https://public.example/api');
-    expect(response.status).toBe(200);
-    expect(fetchImplSpy.mock.calls[0][0]).toEqual({ redirect: 'manual' });
+    expect((await fetchImpl('https://public.example/api', {
+      method: 'PATCH', headers: { 'X-Test': 'override' }, body: 'updated',
+    })).status).toBe(200);
+    const fromInit = fetchImplSpy.mock.calls[0][0] as Request;
+    expect(fromInit.method).toBe('PATCH');
+    expect(fromInit.headers.get('X-Test')).toBe('override');
+    expect(await fromInit.text()).toBe('updated');
+    expect(fromInit.redirect).toBe('manual');
+
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('host fetch failed'); }));
     await expect(fetchImpl('https://public.example/failure')).rejects.toThrow('host fetch failed');
     expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/failure')).toBe('host fetch failed');
