@@ -255,3 +255,8 @@ third-party packages remain under their own license terms.
 ### Cloudflare Mesh egress
 
 The deployed Worker binds `MESH` to the default Cloudflare Mesh virtual network via `cf1:network`. The Servo network adapter uses `env.MESH.fetch()` for all HTTP(S) navigation, document, asset, and in-page network requests. It does not fall back to the Worker-global fetch if Mesh is unavailable. Servo's WebSocket factory requests a WebSocket upgrade through the same Mesh binding, bridges messages and closes the session if the upgrade fails; ordinary WebSockets must never bypass the routing policy. Confirm WebSocket upgrade support in your deployed account and inspect Cloudflare Gateway traffic logs. HTTP previews remain offline. This is Gateway/Mesh routing, not a WARP client process running in the Worker.
+
+
+### Browser implementation boundary
+
+MCP's `requestHttp` tool delegates validation and page execution to `ServoWorkerRuntime.requestHttp()` in Servo-WASM. MCP retains only tool-level URL admission, session selection, result formatting, and Durable Object orchestration. Browser-origin validation, page-script execution and transport implementation are owned by the Servo-WASM adapter. The new method requires an adapter artifact containing Servo-WASM PR #10; the default artifact-fetch script still selects a successful main-branch build.
