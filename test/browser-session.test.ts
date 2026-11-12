@@ -881,7 +881,7 @@ describe('operate lifecycle', () => {
 
   it('executes HTTP calls in the Servo page runtime instead of Worker fetch', async () => {
     const body = Buffer.from('{"answer":42}').toString('base64');
-    const session = await activeSession({ evaluations: {
+    const session = await activeSession({ summary: { url: 'https://public.example/page' }, evaluations: {
       [RESUME_MARKER]: okString(validResumeState),
       '(async () => {\n  const request = ': okString({
         status: 200, statusText: 'OK', url: 'https://public.example/api',
@@ -891,7 +891,7 @@ describe('operate lifecycle', () => {
     } });
     const result = await session.requestHttp({
       url: 'https://public.example/api', method: 'POST',
-      headers: { Authorization: 'Bearer fixture-only' }, body: '{"hello":true}',
+      headers: { 'X-Test-Header': 'safe-fixture' }, body: '{"hello":true}',
       followRedirects: true, maxResponseBytes: 1024, maxDurationMs: 10000,
     });
     expect(result).toMatchObject({ status: 200, url: 'https://public.example/api', bodyBase64: body });
@@ -901,13 +901,18 @@ describe('operate lifecycle', () => {
     expect(script).toContain('"method":"POST"');
     expect(fetchImplSpy).not.toHaveBeenCalled();
     await expect(session.requestHttp({
+      url: 'https://public.example/api', method: 'GET',
+      headers: { Authorization: 'Bearer fixture-only' },
+      followRedirects: true, maxResponseBytes: 10, maxDurationMs: 5000,
+    })).rejects.toThrow(/cannot safely carry Authorization/);
+    await expect(session.requestHttp({
       url: 'http://127.0.0.1/', method: 'GET', followRedirects: true,
       maxResponseBytes: 10, maxDurationMs: 5000,
     })).rejects.toThrow(/Private, local/);
   });
 
-  it('does not restore another origin when a cross-origin HTTP response returns that URL', async () => {
-    const session = await activeSession({ evaluations: {
+  it('does not restore another origin when an HTTP response URL differs from the tab origin', async () => {
+    const session = await activeSession({ summary: { url: 'https://public.example/page' }, evaluations: {
       [RESUME_MARKER]: okString(validResumeState),
       '(async () => {\n  const request = ': okString({
         status: 200, statusText: 'OK', url: 'https://other.example/resource',
@@ -916,7 +921,7 @@ describe('operate lifecycle', () => {
     } });
     const restore = vi.spyOn(session as any, 'restoreNavigatedOrigin');
     const response = await session.requestHttp({
-      url: 'https://other.example/resource', method: 'GET',
+      url: 'https://public.example/resource', method: 'GET',
       followRedirects: true, maxResponseBytes: 1024, maxDurationMs: 8000,
     });
     expect(response.url).toBe('https://other.example/resource');
@@ -924,7 +929,7 @@ describe('operate lifecycle', () => {
   });
 
   it('preserves literal dollar tokens in request bodies and enforces UTF-8 byte caps', async () => {
-    const session = await activeSession({ evaluations: {
+    const session = await activeSession({ summary: { url: 'https://public.example/page' }, evaluations: {
       [RESUME_MARKER]: okString(validResumeState),
       '(async () => {\n  const request = ': okString({
         status: 204, statusText: 'No Content', url: 'https://public.example/api',
