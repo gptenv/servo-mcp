@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '22.14.0'
           cache: npm
 
       - run: npm ci
@@ -43,7 +43,10 @@ jobs:
           const binary = await install({ browser, buildId: PUPPETEER_REVISIONS[browser], cacheDir: join(homedir(), '.cache/servo-puppeteer') });
           appendFileSync(process.env.GITHUB_ENV, `CHROME_PATH=${binary.executablePath}\n`);
           JS
-      - run: npm test
+      - name: Run npm test
+        run: npm test
+        env:
+          NODE_OPTIONS: --experimental-sqlite
 
   build-worker:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -55,7 +58,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '22.14.0'
 
       # CI builds the public rolling main source directly, so the local-only
       # SERVO_WASM_GITHUB_TOKEN is never copied into GitHub Actions.
@@ -138,6 +141,15 @@ jobs:
         working-directory: servo-wasm-source/ports/servo-js-wasm
         run: npm test
 
+      - name: Verify browser API required by Servo MCP
+        working-directory: servo-wasm-source/ports/servo-js-wasm
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { createCloudflareServoBrowser } from './worker-adapter.mjs';
+          assert.equal(typeof createCloudflareServoBrowser, 'function', 'Servo MCP requires the Cloudflare browser factory');
+          JS
+
       - name: Assemble and verify the deployment package
         working-directory: servo-wasm-source/ports/servo-js-wasm
         shell: bash
@@ -177,7 +189,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '22.14.0'
           cache: npm
 
       - run: npm ci

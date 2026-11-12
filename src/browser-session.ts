@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
-import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
+import { createServoWorkerRuntime, renderOfflineHtmlPreview, planServoRecordingCapture, planServoRecordingFinalization } from './vendor/servo-worker/worker-adapter.mjs';
 import { createCloudflareServoBrowser } from './cloudflare-browser';
 import { assertPublicHttpUrl } from './security';
 import { type HttpRequest, type ServoHttpResponse } from './http-tools';
@@ -15,10 +15,6 @@ const MAX_RETAINED_SCREENSHOTS = 8;
 const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_CHUNK_CHARS = 1_000_000;
 const SNAPSHOT_CHUNK_CHARS = 200_000;
-const STORAGE_CAPTURE_CHUNK_CHARS = 32_768;
-const MAX_WEB_STORAGE_CAPTURE_CHARS = 512 * 1024;
-const MAX_INDEXEDDB_CAPTURE_BYTES = 2 * 1024 * 1024;
-const MAX_INDEXEDDB_CAPTURE_RECORDS = 5_000;
 const MAX_RECORDING_FPS = 3;
 const MAX_RECORDING_DURATION_SECONDS = 60;
 const MAX_RECORDING_FRAME_BYTES = 1 * 1024 * 1024;
@@ -27,150 +23,11 @@ const MAX_RECORDING_OUTPUT_BYTES = 16 * 1024 * 1024;
 const RECORDING_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_RETAINED_RECORDINGS = 3;
 const MAX_RETAINED_RECORDING_BYTES = 64 * 1024 * 1024;
-const RECORDING_FRAME_WIDTH = 960;
-const RECORDING_FRAME_HEIGHT = 540;
-const RECORDING_JPEG_QUALITY = 70;
-const pageSummaryExpression = `JSON.stringify({url: location.href, title: document.title, text: (()=>{
-  const contents=[], visited=new Set();
-  const nodes=(root)=>{try{return root.querySelectorAll('*')}catch{return []}};
-  const shadowText=(root)=>{
-    let text='';
-    const visit=(node)=>{
-      if(node.nodeType===3){text+=node.nodeValue||'';return;}
-      if(node.nodeType===1&&['script','style','template'].includes(node.localName))return;
-      for(const child of node.childNodes||[])visit(child);
-    };
-    for(const child of root.childNodes||[])visit(child);
-    return text;
-  };
-  const traverse=(root)=>{
-    if(!root||visited.has(root))return;
-    visited.add(root);
-    let text=root.body?.innerText;
-    if(typeof text!=='string')text=shadowText(root);
-    if(text?.trim())contents.push(text);
-    for(const element of nodes(root)){
-      if(element.shadowRoot)traverse(element.shadowRoot);
-      if(element.localName==='iframe')try{traverse(element.contentDocument)}catch{}
-    }
-  };
-  traverse(document);
-  return contents.join('\\n').slice(0, 20000);
-})()})`;
+
 // Servo keeps the requested HTTP URL on a network-error document, but its
 // security origin is opaque. Its storage must never replace the site's state.
-const isOpaqueHttpDocument = "globalThis.origin === 'null' && location.origin !== 'null'";
-const resumeStateExpression = (captureIndexedDB = true) => `(async()=>{
-  const nodePath=(node)=>{const path=[];for(let current=node;current&&current!==document.documentElement;current=current.parentElement){const parent=current.parentElement;if(!parent)return null;path.unshift(Array.prototype.indexOf.call(parent.children,current));}return path;};
-  if(${isOpaqueHttpDocument})return JSON.stringify({opaqueDocument:true});
-  const fields=[];
-  for(const element of Array.from(document.querySelectorAll('input,textarea,select,[contenteditable="true"]')).slice(0,200)){
-    const tag=element.tagName.toLowerCase();
-    if(tag==='input'&&['password','file'].includes((element.type||'').toLowerCase()))continue;
-    const path=nodePath(element);if(!path)continue;
-    if(tag==='input'&&['checkbox','radio'].includes((element.type||'').toLowerCase()))fields.push({path,kind:'checked',value:Boolean(element.checked)});
-    else if(tag==='select')fields.push({path,kind:'selected',value:Array.from(element.options).map((option)=>Boolean(option.selected))});
-    else if(element.isContentEditable)fields.push({path,kind:'html',value:element.innerHTML.slice(0,2048)});
-    else {let selectionStart=null,selectionEnd=null;try{selectionStart=element.selectionStart??null;selectionEnd=element.selectionEnd??null;}catch{}fields.push({path,kind:'value',value:String(element.value??'').slice(0,2048),selectionStart,selectionEnd});}
-  }
-  const bytesToBase64=(bytes)=>{let binary='';for(let offset=0;offset<bytes.length;offset+=0x8000)binary+=String.fromCharCode(...bytes.subarray(offset,offset+0x8000));return btoa(binary);};
-  const encodeGraph=async(root)=>{const nodes=[];const seen=new Map();const encode=async(value)=>{
-    if(value===null||typeof value==='string'||typeof value==='boolean')return value;
-    if(typeof value==='number')return Number.isFinite(value)?value:{t:'number',v:String(value)};
-    if(typeof value==='undefined')return {t:'undefined'};
-    if(typeof value==='bigint')return {t:'bigint',v:String(value)};
-    if(typeof value==='symbol'||typeof value==='function')throw new TypeError('IndexedDB value contains a non-cloneable value.');
-    if(seen.has(value))return {r:seen.get(value)};
-    const id=nodes.length;seen.set(value,id);nodes.push(null);
-    let node;
-    if(value instanceof Date){const time=value.getTime();node={t:'date',v:Number.isFinite(time)?time:{t:'number',v:'NaN'}};}
-    else if(value instanceof RegExp)node={t:'regexp',s:value.source,f:value.flags,l:value.lastIndex};
-    else if(value instanceof ArrayBuffer)node={t:'buffer',v:bytesToBase64(new Uint8Array(value))};
-    else if(ArrayBuffer.isView(value))node={t:'view',c:value.constructor.name,b:await encode(value.buffer),o:value.byteOffset,l:value instanceof DataView?value.byteLength:value.length};
-    else if(typeof Blob!=='undefined'&&value instanceof Blob){const common={type:value.type,bytes:bytesToBase64(new Uint8Array(await value.arrayBuffer()))};node=typeof File!=='undefined'&&value instanceof File?{t:'file',...common,name:value.name,lastModified:value.lastModified}:{t:'blob',...common};}
-    else if(value instanceof Map){const entries=[];for(const [key,item] of value)entries.push([await encode(key),await encode(item)]);node={t:'map',e:entries};}
-    else if(value instanceof Set){const entries=[];for(const item of value)entries.push(await encode(item));node={t:'set',e:entries};}
-    else if(Array.isArray(value)){const entries=[];for(let i=0;i<value.length;i++)entries.push(i in value?await encode(value[i]):{t:'hole'});node={t:'array',l:value.length,e:entries};}
-    else if(value&&Object.getPrototypeOf(value)===Object.prototype||value&&Object.getPrototypeOf(value)===null){const entries=[];for(const [key,item] of Object.entries(value))entries.push([key,await encode(item)]);node={t:Object.getPrototypeOf(value)===null?'null-object':'object',e:entries};}
-    else throw new TypeError('IndexedDB contains an unsupported structured-clone value: '+Object.prototype.toString.call(value));
-    nodes[id]=node;return {r:id};
-  };return {root:await encode(root),nodes};};
-  const databases=[];
-  let estimatedIndexedDBBytes=0;
-  let indexedDBRecordCount=0;
-  let estimateNodes=0;
-  const estimateValueBytes=(value,seen=new Set())=>{
-    if(++estimateNodes>50000)return ${MAX_INDEXEDDB_CAPTURE_BYTES+1};
-    if(value===null||typeof value==='boolean'||typeof value==='number'||typeof value==='bigint')return 8;
-    if(typeof value==='string')return value.length*2;
-    if(value instanceof ArrayBuffer)return value.byteLength;
-    if(ArrayBuffer.isView(value))return value.byteLength;
-    if(typeof Blob!=='undefined'&&value instanceof Blob)return value.size;
-    if(typeof value!=='object'||seen.has(value))return 0;
-    seen.add(value);
-    let bytes=16;
-    if(value instanceof Map){for(const [key,item] of value){bytes+=estimateValueBytes(key,seen)+estimateValueBytes(item,seen);if(bytes>${MAX_INDEXEDDB_CAPTURE_BYTES})break;}}
-    else if(value instanceof Set){for(const item of value){bytes+=estimateValueBytes(item,seen);if(bytes>${MAX_INDEXEDDB_CAPTURE_BYTES})break;}}
-    else if(value instanceof Date||value instanceof RegExp)bytes+=128;
-    else {for(const key in value){if(Object.prototype.hasOwnProperty.call(value,key)){bytes+=key.length*2+estimateValueBytes(value[key],seen);if(bytes>${MAX_INDEXEDDB_CAPTURE_BYTES})break;}}}
-    return bytes;
-  };
-  if(${captureIndexedDB}&&location.origin!=='null'&&typeof indexedDB!=='undefined'&&typeof indexedDB.databases==='function'){
-    let infos;try{infos=await indexedDB.databases();}catch(error){throw new Error('IndexedDB snapshot could not list databases: '+String(error));}
-    for(const info of infos){if(typeof info.name!=='string')continue;let db;try{db=await new Promise((resolve,reject)=>{const request=indexedDB.open(info.name);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('IndexedDB database enumeration was blocked.'));});}catch(error){throw new Error('IndexedDB snapshot could not open '+info.name+': '+String(error));}
-      let stage='reading schema';try{
-        const stores=[];const names=Array.from(db.objectStoreNames);
-        if(names.length){
-          const tx=db.transaction(names,'readonly');const pending=[];
-          for(const name of names){
-            stage='reading records from '+name;const store=tx.objectStore(name);
-            const indexes=Array.from(store.indexNames,(indexName)=>{const index=store.index(indexName);return {name:index.name,keyPath:index.keyPath,unique:index.unique,multiEntry:index.multiEntry};});
-            const storeData={name:store.name,keyPath:store.keyPath,autoIncrement:store.autoIncrement,indexes,records:[]};stores.push(storeData);
-            pending.push(new Promise((resolve,reject)=>{
-              const request=store.openCursor();
-              request.onerror=()=>reject(request.error);
-              request.onsuccess=()=>{const cursor=request.result;if(!cursor){resolve();return;}try{if(++indexedDBRecordCount>${MAX_INDEXEDDB_CAPTURE_RECORDS})throw new RangeError('IndexedDB snapshot exceeds the ${MAX_INDEXEDDB_CAPTURE_RECORDS} record limit.');estimateNodes=0;estimatedIndexedDBBytes+=estimateValueBytes(cursor.primaryKey)+estimateValueBytes(cursor.value);if(estimatedIndexedDBBytes>${MAX_INDEXEDDB_CAPTURE_BYTES})throw new RangeError('IndexedDB snapshot exceeds the ${MAX_INDEXEDDB_CAPTURE_BYTES} byte safety limit.');storeData.records.push({primaryKey:cursor.primaryKey,value:cursor.value});cursor.continue();}catch(error){reject(error);try{tx.abort();}catch{}}};
-            }));
-          }
-          await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('IndexedDB snapshot transaction aborted.'));});
-          await Promise.all(pending);
-          stage='serializing records';
-          for(const store of stores){for(const record of store.records){record.primaryKey=await encodeGraph(record.primaryKey);record.value=await encodeGraph(record.value);}}
-        }
-        databases.push({name:db.name,version:db.version,stores});
-      }catch(error){throw new Error('IndexedDB snapshot failed while '+stage+' in '+info.name+': '+String(error));}finally{db.close();}
-    }
-  }
-  return JSON.stringify({version:1,url:location.href,origin:location.origin,scrollX:scrollX||0,scrollY:scrollY||0,fields,localStorage:[],sessionStorage:[],cookies:'',indexedDB:databases});
-})()`;
-
 type StorageProbe = { localStorage: boolean; sessionStorage: boolean; indexedDB: boolean; fresh?: boolean };
 const ALL_STORAGE_PROBES: StorageProbe = { localStorage: true, sessionStorage: true, indexedDB: true };
-
-function storageProbeExpression(key: string, reset: boolean): string {
-  return `(function(){
-    const key=${JSON.stringify(key)};
-    let state=globalThis[key];
-    const fresh=!state;
-    if(fresh){state=Object.create(null);Object.defineProperty(globalThis,key,{value:state,configurable:false});}
-    let supported=true;
-    for(const name of ['localStorage','sessionStorage','indexedDB']){
-      let owner=globalThis;
-      while(owner&&!Object.getOwnPropertyDescriptor(owner,name))owner=Object.getPrototypeOf(owner);
-      const descriptor=owner&&Object.getOwnPropertyDescriptor(owner,name);
-      if(!descriptor||typeof descriptor.get!=='function'){supported=false;continue;}
-      if(state[name+'Getter']!==descriptor.get){
-        const original=descriptor.get;
-        const getter=function(){state[name]=(state[name]||0)+1;return Reflect.apply(original,this,[]);};
-        try{Object.defineProperty(owner,name,{...descriptor,get:getter});state[name+'Getter']=getter;}
-        catch{supported=false;}
-      }
-    }
-    const result={supported,fresh,localStorage:(state.localStorage||0)>0,sessionStorage:(state.sessionStorage||0)>0,indexedDB:(state.indexedDB||0)>0};
-    if(${reset})state.localStorage=state.sessionStorage=state.indexedDB=0;
-    return JSON.stringify(result);
-  })()`;
-}
 
 type ResumeField = { path: number[]; kind: 'checked' | 'selected' | 'html' | 'value'; value: boolean | boolean[] | string; selectionStart?: number | null; selectionEnd?: number | null };
 type ResumeSnapshot = {
@@ -313,7 +170,7 @@ async function awaitReady(runtime: ServoRuntime, readiness: PageReadinessOptions
 }
 
 async function pageSummary(runtime: ServoRuntime): Promise<PageSummary> {
-  const parsed = parseEvaluationResult(await runtime.evaluate(pageSummaryExpression));
+  const parsed = await runtime.pageSummary();
   if (typeof parsed !== 'object' || parsed === null || !('url' in parsed) || !('title' in parsed) || !('text' in parsed)) {
     throw new Error('Servo returned an invalid page summary.');
   }
@@ -330,14 +187,6 @@ async function pageUrl(runtime: ServoRuntime): Promise<string> {
   return (await pageSummary(runtime)).url;
 }
 
-function parseJsonResult(runtime: ServoRuntime): unknown {
-  const result = parseEvaluationResult(runtime.pageResult());
-  if (typeof result === 'string') {
-    try { return JSON.parse(result); } catch { return result; }
-  }
-  return result;
-}
-
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -349,59 +198,6 @@ function bytesToBase64(bytes: Uint8Array): string {
 function base64ToBytes(encoded: string): Uint8Array {
   const binary = atob(encoded);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-const applyResumeState = (snapshot: ResumeSnapshot): string => `(async()=>{
-  const s=${JSON.stringify(snapshot)};
-  if(${isOpaqueHttpDocument})return JSON.stringify({restored:false});
-  const restoreStorage=(getStore,entries)=>{const store=getStore();store.clear();for(const [key,value] of entries)store.setItem(key,value);};
-  const origin=new URL(s.url).origin;
-  const localEntries=s.localStorageByOrigin?.[origin]??s.localStorage;
-  const sessionEntries=s.sessionStorageByOrigin?.[origin]??s.sessionStorage;
-  restoreStorage(()=>localStorage,localEntries);restoreStorage(()=>sessionStorage,sessionEntries);
-  if(s.cookies){for(const cookie of s.cookies.split(/;\\s*/)){if(cookie)try{document.cookie=cookie;}catch{}}}
-  const decodeGraph=(graph)=>{const nodes=graph.nodes;const values=new Array(nodes.length);for(let i=0;i<nodes.length;i++){const node=nodes[i];switch(node.t){case'object':values[i]={};break;case'null-object':values[i]=Object.create(null);break;case'array':values[i]=[];break;case'map':values[i]=new Map();break;case'set':values[i]=new Set();break;case'date':values[i]=new Date(node.v&&node.v.t==='number'?NaN:node.v);break;case'regexp':values[i]=new RegExp(node.s,node.f);values[i].lastIndex=node.l;break;case'buffer':{const raw=atob(node.v);const bytes=Uint8Array.from(raw,(c)=>c.charCodeAt(0));values[i]=bytes.buffer;break;}case'blob':case'file':{const raw=atob(node.bytes);const bytes=Uint8Array.from(raw,(c)=>c.charCodeAt(0));values[i]=node.t==='file'?new File([bytes],node.name,{type:node.type,lastModified:node.lastModified}):new Blob([bytes],{type:node.type});break;}case'view':values[i]=null;break;}}
-    const valueOf=(v)=>{if(v&&typeof v==='object'&&'r'in v)return values[v.r];if(v&&v.t==='undefined')return undefined;if(v&&v.t==='bigint')return BigInt(v.v);if(v&&v.t==='number')return v.v==='NaN'?NaN:v.v==='Infinity'?Infinity:v.v==='-Infinity'?-Infinity:-0;return v;};
-    for(let i=0;i<nodes.length;i++){const node=nodes[i];if(node.t==='view'){const buffer=valueOf(node.b);const ctor=node.c==='DataView'?DataView:globalThis[node.c];if(typeof ctor!=='function')throw new TypeError('Unsupported IndexedDB typed array: '+node.c);values[i]=node.c==='DataView'?new DataView(buffer,node.o,node.l):new ctor(buffer,node.o,node.l);}}
-    for(let i=0;i<nodes.length;i++){const node=nodes[i],target=values[i];if(node.t==='object'||node.t==='null-object')for(const [key,value] of node.e)Object.defineProperty(target,key,{value:valueOf(value),writable:true,enumerable:true,configurable:true});else if(node.t==='array'){target.length=node.l;for(let index=0;index<node.e.length;index++)if(!(node.e[index]&&node.e[index].t==='hole'))target[index]=valueOf(node.e[index]);}else if(node.t==='map')for(const [key,value] of node.e)target.set(valueOf(key),valueOf(value));else if(node.t==='set')for(const value of node.e)target.add(valueOf(value));}
-    return valueOf(graph.root);};
-  const restoreIndexedDB=async(databases,present)=>{if(!present||typeof indexedDB==='undefined')return;const expected=new Set(databases.map((database)=>database.name));for(const info of await indexedDB.databases())if(info.name&&!expected.has(info.name))await new Promise((resolve,reject)=>{const request=indexedDB.deleteDatabase(info.name);request.onsuccess=resolve;request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('IndexedDB database deletion was blocked.'));});for(const saved of databases){const db=await new Promise((resolve,reject)=>{const request=indexedDB.open(saved.name);request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('IndexedDB restore was blocked.'));request.onsuccess=()=>resolve(request.result);});
-      const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);const schemaDiffers=db.objectStoreNames.length!==saved.stores.length||saved.stores.some((store)=>{if(!db.objectStoreNames.contains(store.name))return true;const existing=db.transaction(store.name,'readonly').objectStore(store.name);return !same(existing.keyPath,store.keyPath)||existing.autoIncrement!==store.autoIncrement||existing.indexNames.length!==store.indexes.length||store.indexes.some((index)=>{if(!existing.indexNames.contains(index.name))return true;const current=existing.index(index.name);return !same(current.keyPath,index.keyPath)||current.unique!==index.unique||current.multiEntry!==index.multiEntry;});});let version=db.version;db.close();
-      const restored=await new Promise((resolve,reject)=>{const request=indexedDB.open(saved.name,schemaDiffers?Math.max(saved.version,version+1):version);request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('IndexedDB schema restore was blocked.'));request.onupgradeneeded=()=>{const target=request.result;for(const existingName of Array.from(target.objectStoreNames))if(!saved.stores.some((store)=>store.name===existingName))target.deleteObjectStore(existingName);for(const store of saved.stores){let objectStore;if(target.objectStoreNames.contains(store.name)){objectStore=request.transaction.objectStore(store.name);if(!same(objectStore.keyPath,store.keyPath)||objectStore.autoIncrement!==store.autoIncrement){target.deleteObjectStore(store.name);objectStore=target.createObjectStore(store.name,{keyPath:store.keyPath,autoIncrement:store.autoIncrement});}}else objectStore=target.createObjectStore(store.name,{keyPath:store.keyPath,autoIncrement:store.autoIncrement});for(const existingName of Array.from(objectStore.indexNames))if(!store.indexes.some((index)=>index.name===existingName))objectStore.deleteIndex(existingName);for(const index of store.indexes){if(objectStore.indexNames.contains(index.name)){const current=objectStore.index(index.name);if(!same(current.keyPath,index.keyPath)||current.unique!==index.unique||current.multiEntry!==index.multiEntry)objectStore.deleteIndex(index.name);}if(!objectStore.indexNames.contains(index.name))objectStore.createIndex(index.name,index.keyPath,{unique:index.unique,multiEntry:index.multiEntry});}}};request.onsuccess=()=>resolve(request.result);});
-      try{for(const store of saved.stores){const objectStore=restored.transaction(store.name,'readwrite').objectStore(store.name);const tx=objectStore.transaction;objectStore.clear();for(const record of store.records){const value=decodeGraph(record.value);const key=decodeGraph(record.primaryKey);if(objectStore.keyPath===null)objectStore.put(value,key);else objectStore.put(value);}await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('IndexedDB restore transaction aborted.'));});}}finally{restored.close();}
-    }};
-  const databases=s.indexedDBByOrigin?.[origin]??s.indexedDB??[];
-  await restoreIndexedDB(databases,s.indexedDBStatePresent??true);
-  const nodeAt=(path)=>{let node=document.documentElement;for(const index of path){node=node?.children?.[index];if(!node)return null;}return node;};
-  for(const field of s.fields){const node=nodeAt(field.path);if(!node)continue;try{if(field.kind==='checked')node.checked=field.value;else if(field.kind==='selected')Array.from(node.options).forEach((option,index)=>option.selected=Boolean(field.value[index]));else if(field.kind==='html')node.innerHTML=field.value;else{node.value=field.value;if(field.selectionStart!==null&&field.selectionStart!==undefined&&typeof node.setSelectionRange==='function')node.setSelectionRange(field.selectionStart,field.selectionEnd);}}catch{}}
-  try{scrollTo(s.scrollX,s.scrollY);}catch{}
-  return JSON.stringify({restored:true,hasStorage:localEntries.length+sessionEntries.length>0,hasCookies:Boolean(s.cookies),hasIndexedDBState:s.indexedDBStatePresent??databases.length>0,indexedDatabases:databases.length});
-})()`;
-
-function snapshotForOrigin(snapshot: ResumeSnapshot, url: string): ResumeSnapshot {
-  const origin = new URL(url).origin;
-  const snapshotOrigin = snapshot.origin ?? new URL(snapshot.url).origin;
-  const hasOriginMaps = snapshot.localStorageByOrigin !== undefined
-    || snapshot.sessionStorageByOrigin !== undefined
-    || snapshot.indexedDBByOrigin !== undefined;
-  return {
-    ...snapshot,
-    url,
-    fields: snapshot.url === url ? snapshot.fields : [],
-    scrollX: snapshot.url === url ? snapshot.scrollX : 0,
-    scrollY: snapshot.url === url ? snapshot.scrollY : 0,
-    localStorage: hasOriginMaps ? snapshot.localStorageByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.localStorage : [],
-    sessionStorage: hasOriginMaps ? snapshot.sessionStorageByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.sessionStorage : [],
-    cookies: snapshot.url === url ? snapshot.cookies : '',
-    indexedDB: hasOriginMaps ? snapshot.indexedDBByOrigin?.[origin] ?? [] : origin === snapshotOrigin ? snapshot.indexedDB ?? [] : [],
-    indexedDBStatePresent: snapshot.indexedDBByOrigin !== undefined
-      ? Object.hasOwn(snapshot.indexedDBByOrigin, origin)
-      : origin === snapshotOrigin && snapshot.indexedDB !== undefined,
-    localStorageByOrigin: undefined,
-    sessionStorageByOrigin: undefined,
-    indexedDBByOrigin: undefined,
-    originAssets: undefined,
-  };
 }
 
 export class ServoBrowserSession extends DurableObject<Env> {
@@ -515,9 +311,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async storageProbe(runtime: ServoRuntime, reset: boolean): Promise<StorageProbe | undefined> {
     try {
-      const value = parseEvaluationResult(await runtime.evaluate(
-        storageProbeExpression(this.storageProbeKey, reset),
-      ));
+      const value = await runtime.probeStorage(this.storageProbeKey, reset);
       if (typeof value !== 'object' || value === null || !('supported' in value) || value.supported !== true
         || !('localStorage' in value) || typeof value.localStorage !== 'boolean'
         || !('sessionStorage' in value) || typeof value.sessionStorage !== 'boolean'
@@ -616,16 +410,12 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async beginRecordingEncoding(recording: RecordingRow, stoppedAt = Date.now()): Promise<void> {
     if (recording.status !== 'recording') return;
-    const end = Math.min(stoppedAt, recording.started_at + recording.max_duration_ms);
-    const elapsed = Math.max(1, end - recording.started_at);
     const lastSlot = this.ctx.storage.sql.exec<{ slot_index: number | null }>(
       'SELECT MAX(slot_index) AS slot_index FROM browser_recording_frame WHERE recording_id = ?', recording.id,
     ).toArray()[0]?.slot_index;
-    const targetFrames = Math.min(recording.max_frames, Math.max(
-      1,
-      Math.ceil(elapsed * recording.fps / 1000),
-      typeof lastSlot === 'number' ? lastSlot + 1 : 0,
-    ));
+    const plan = planServoRecordingFinalization(recording, stoppedAt, lastSlot);
+    if (!plan) return;
+    const { end, targetFrames } = plan;
     this.ctx.storage.sql.exec(
       "UPDATE browser_recording SET status = 'encoding', stopped_at = ?, target_frames = ?, expires_at = ?, error = NULL WHERE id = ? AND status = 'recording'",
       end, targetFrames, Date.now() + RECORDING_RETENTION_MS, recording.id,
@@ -638,27 +428,20 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const recording = this.recording(recordingId);
     if (!recording || recording.status !== 'recording') return;
     const now = Date.now();
-    const deadline = recording.started_at + recording.max_duration_ms;
-    if (!initial && now >= deadline) {
-      await this.beginRecordingEncoding(recording, deadline);
-      return;
-    }
-    const slot = initial ? 0 : Math.min(
-      recording.max_frames - 1,
-      Math.floor((now - recording.started_at) * recording.fps / 1000),
-    );
     const lastSlot = this.ctx.storage.sql.exec<{ slot_index: number | null }>(
       'SELECT MAX(slot_index) AS slot_index FROM browser_recording_frame WHERE recording_id = ?', recordingId,
     ).toArray()[0]?.slot_index;
-    if (typeof lastSlot === 'number' && slot <= lastSlot) return;
+    const plan = planServoRecordingCapture(recording, now, initial, lastSlot);
+    if (plan.action === 'finish') {
+      await this.beginRecordingEncoding(recording, plan.stoppedAt);
+      return;
+    }
+    if (plan.action !== 'capture') return;
+    const { slot, deadline } = plan;
 
     try {
       const runtime = await this.requireRuntime();
-      const frame = await runtime.captureRecordingFrame({
-        maxWidth: RECORDING_FRAME_WIDTH,
-        maxHeight: RECORDING_FRAME_HEIGHT,
-        quality: RECORDING_JPEG_QUALITY,
-      });
+      const frame = await runtime.captureRecordingFrame();
       if (frame.jpeg.byteLength > MAX_RECORDING_FRAME_BYTES) {
         throw new RangeError(`A recording frame exceeded ${MAX_RECORDING_FRAME_BYTES} bytes.`);
       }
@@ -820,58 +603,9 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return true;
   }
 
-  private async captureWebStorage(
-    runtime: ServoRuntime,
-    storageName: 'localStorage' | 'sessionStorage',
-  ): Promise<[string, string][]> {
-    const temporaryName = `__servoMcpStorageCapture_${crypto.randomUUID().replaceAll('-', '')}`;
-    const temporaryKey = JSON.stringify(temporaryName);
-    const setup = parseEvaluationResult(await runtime.evaluate(
-      `(()=>{if(location.origin==='null')return JSON.stringify({opaque:true,count:0});const store=globalThis[${JSON.stringify(storageName)}];const keys=[];let chars=0;for(let i=0;i<store.length;i++){const key=store.key(i);if(key!==null){const value=String(store.getItem(key)??'');chars+=key.length+value.length;if(chars>${MAX_WEB_STORAGE_CAPTURE_CHARS})throw new RangeError('${storageName} exceeds the ${MAX_WEB_STORAGE_CAPTURE_CHARS} character snapshot safety limit.');keys.push(key);}}globalThis[${temporaryKey}]=keys;return JSON.stringify({count:keys.length});})()`,
-
-    ));
-    if (typeof setup !== 'object' || setup === null || !('count' in setup) || typeof setup.count !== 'number') {
-      throw new Error(`Servo could not enumerate ${storageName}: ${JSON.stringify(setup).slice(0, 512)}`);
-    }
-    if ('opaque' in setup && setup.opaque === true) return [];
-
-    const entries: [string, string][] = [];
-    try {
-      for (let index = 0; index < setup.count; index++) {
-        let key = '';
-        let value = '';
-        let keyLength: number | undefined;
-        let valueLength: number | undefined;
-        for (let offset = 0; keyLength === undefined || offset < Math.max(keyLength, valueLength ?? 0); offset += STORAGE_CAPTURE_CHUNK_CHARS) {
-          const piece = parseEvaluationResult(await runtime.evaluate(
-            `JSON.stringify((()=>{const key=globalThis[${temporaryKey}]?.[${index}];if(typeof key!=='string')throw new Error('Storage changed during snapshot capture.');const value=globalThis[${JSON.stringify(storageName)}].getItem(key);if(value===null)throw new Error('Storage changed during snapshot capture.');return {keyLength:key.length,valueLength:value.length,key:key.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS}),value:value.slice(${offset},${offset + STORAGE_CAPTURE_CHUNK_CHARS})}})())`,
-
-          ));
-          if (typeof piece !== 'object' || piece === null || !('key' in piece) || typeof piece.key !== 'string'
-            || !('value' in piece) || typeof piece.value !== 'string'
-            || !('keyLength' in piece) || typeof piece.keyLength !== 'number'
-            || !('valueLength' in piece) || typeof piece.valueLength !== 'number') {
-            throw new Error(`Servo could not read ${storageName} entry ${index}: ${JSON.stringify(piece).slice(0, 512)}`);
-          }
-          if (keyLength !== undefined && (keyLength !== piece.keyLength || valueLength !== piece.valueLength)) {
-            throw new Error(`${storageName} changed during snapshot capture.`);
-          }
-          keyLength = piece.keyLength;
-          valueLength = piece.valueLength;
-          key += piece.key;
-          value += piece.value;
-        }
-        entries.push([key, value]);
-      }
-    } finally {
-      await runtime.evaluate(`delete globalThis[${temporaryKey}]`).catch(() => undefined);
-    }
-    return entries;
-  }
-
   private async captureSnapshot(runtime: ServoRuntime, resources: StorageProbe = ALL_STORAGE_PROBES): Promise<void> {
     const cookieState = bytesToBase64(runtime.exportCookieState());
-    const value = parseEvaluationResult(await runtime.evaluate(resumeStateExpression(resources.indexedDB)));
+    const value = await runtime.captureResumeState({ captureIndexedDB: resources.indexedDB });
     if (typeof value === 'object' && value !== null && 'opaqueDocument' in value && value.opaqueDocument === true) return;
     if (typeof value !== 'object' || value === null || !('url' in value) || !('fields' in value)) {
       throw new Error(`Servo returned invalid browser restore state: ${JSON.stringify(value).slice(0, 512)}`);
@@ -881,10 +615,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
     const resourcesTouched = resources.localStorage || resources.sessionStorage || resources.indexedDB;
     const existingStorage = resourcesTouched ? this.loadSnapshot(snapshot.url) : undefined;
     snapshot.localStorage = resources.localStorage
-      ? await this.captureWebStorage(runtime, 'localStorage')
+      ? await runtime.captureWebStorage('localStorage')
       : existingStorage?.localStorage ?? [];
     snapshot.sessionStorage = resources.sessionStorage
-      ? await this.captureWebStorage(runtime, 'sessionStorage')
+      ? await runtime.captureWebStorage('sessionStorage')
       : existingStorage?.sessionStorage ?? [];
     snapshot.indexedDB = resources.indexedDB ? snapshot.indexedDB ?? [] : existingStorage?.indexedDB ?? [];
     const origin = snapshot.origin ?? new URL(snapshot.url).origin;
@@ -956,24 +690,15 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }
   }
 
-  private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false) {
-    const result = parseEvaluationResult(await runtime.evaluate(
-      applyResumeState(snapshotForOrigin(snapshot, url)),
-    ));
-    if (typeof result !== 'object' || result === null || !('restored' in result)) {
+  private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false, allowFailure = false) {
+    const result = await runtime.restoreResumeState(snapshot, url);
+    if (typeof result !== 'object' || result === null || !('restored' in result) || result.restored !== true) {
+      if (allowFailure) return null;
       const action = reapplying ? 'reapply' : 'apply';
       throw new Error(`Servo could not ${action} the saved tab state: ${JSON.stringify(result).slice(0, 512)}`);
     }
     await pump(runtime);
     return result as { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number };
-  }
-
-  private hasSavedOrigin(snapshot: ResumeSnapshot, url: string): boolean {
-    const origin = new URL(url).origin;
-    return Object.hasOwn(snapshot.localStorageByOrigin ?? {}, origin)
-      || Object.hasOwn(snapshot.sessionStorageByOrigin ?? {}, origin)
-      || Object.hasOwn(snapshot.indexedDBByOrigin ?? {}, origin)
-      || (snapshot.origin ?? new URL(snapshot.url).origin) === origin;
   }
 
   private inlineDocumentHtml(url: string | null): string | undefined {
@@ -982,23 +707,22 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   private async reloadDocument(runtime: ServoRuntime, readiness: PageReadinessOptions, rejectionMessage: string): Promise<void> {
-    const before = await runtime.navigationIdentity();
-    const html = this.inlineDocumentHtml(before.url);
-    if (html !== undefined && before.url) {
-      await runtime.navigateHtml(html, { url: before.url, readiness });
-      return;
-    }
-    if (!runtime.reload()) throw new Error(rejectionMessage);
-    const committed = await runtime.waitForNavigationCommit(before);
-    if (!committed.committed) throw new Error('Servo reload did not commit a document.');
-    await awaitReady(runtime, readiness);
+    const current = await runtime.navigationIdentity();
+    await runtime.reloadDocument({
+      readiness, rejectionMessage,
+      inlineHtml: this.inlineDocumentHtml(current.url),
+    });
   }
 
   private async restoreNavigatedOrigin(runtime: ServoRuntime, url: string): Promise<void> {
     const snapshot = this.loadSnapshot(url);
     if (!snapshot) return;
-    if (!snapshot.originAssets && !this.hasSavedOrigin(snapshot, url)) return;
-    const restored = await this.applySavedState(runtime, snapshot, url);
+    if (!snapshot.originAssets && !runtime.hasSavedOrigin(snapshot, url)) return;
+    // Soft-fail when the current document cannot accept the saved origin state
+    // (for example an opaque network-error page). The later snapshot capture
+    // will see the opaque document and leave the last usable snapshot intact.
+    const restored = await this.applySavedState(runtime, snapshot, url, false, true);
+    if (!restored) return;
     if (restored.hasStorage || restored.hasCookies || restored.hasIndexedDBState || restored.indexedDatabases) {
       await this.reloadDocument(runtime, {}, 'Servo could not reload after restoring this tab origin.');
       await this.applySavedState(runtime, snapshot, url, true);
@@ -1041,28 +765,11 @@ export class ServoBrowserSession extends DurableObject<Env> {
     if (!snapshot) throw new Error('Browser session has no saved tab state to restore.');
     const runtime = await this.createRuntime(row.width, row.height, this.sessionId(), snapshot.cookieState);
     try {
-      const initialHtml = this.inlineDocumentHtml(snapshot.url);
-      const isInlineDocument = initialHtml !== undefined;
-      const isBlankDocument = snapshot.url === 'about:blank';
-      const url = isBlankDocument ? snapshot.url : isInlineDocument ? snapshot.url : assertPublicHttpUrl(snapshot.url).href;
-      const loaded = isBlankDocument || (isInlineDocument
-        ? runtime.loadHtml(initialHtml, { url })
-        : runtime.loadPage(url));
-      if (!loaded) throw new Error('Servo could not reopen the saved tab URL.');
-      let restored: { hasStorage?: boolean; hasCookies?: boolean; hasIndexedDBState?: boolean; indexedDatabases?: number } | undefined;
-      if (!isBlankDocument) {
-        const commit = await runtime.waitForNavigationCommit({ url: 'about:blank', timeOrigin: null });
-        if (!commit.committed) throw new Error('Saved document navigation did not commit.');
-        await awaitReady(runtime);
-        restored = await this.applySavedState(runtime, snapshot, snapshot.url);
-      }
-      // Give restored storage and script-visible cookies a chance to initialize
-      // the re-opened page, as a browser does when restoring a tab profile.
-      if (!isInlineDocument && !isBlankDocument && (restored?.hasStorage || restored?.hasCookies || restored?.hasIndexedDBState || restored?.indexedDatabases)) {
-        if (!runtime.reload()) throw new Error('Servo could not reload the restored tab.');
-        await pump(runtime);
-        await this.applySavedState(runtime, snapshot, snapshot.url, true);
-      }
+      const inlineHtml = this.inlineDocumentHtml(snapshot.url);
+      const url = inlineHtml !== undefined || snapshot.url === 'about:blank'
+        ? snapshot.url
+        : assertPublicHttpUrl(snapshot.url).href;
+      await runtime.restoreBrowserTab({ snapshot, url, inlineHtml });
       await this.storageProbe(runtime, true);
       this.runtime = runtime;
       return runtime;
@@ -1322,10 +1029,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
     }, async (runtime) => {
       const page = await this.summary(runtime);
       if (page.loadError) throw new Error(page.loadError);
-      const html = parseEvaluationResult(await runtime.evaluate(
-        "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))",
-      ));
-      if (typeof html !== 'string') throw new Error('Servo did not return the document HTML.');
+      const html = await runtime.documentHtml();
       return { html, page };
     });
   }
@@ -1579,36 +1283,15 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   async captureHttpPreview(html: string): Promise<{ token: string; byteLength: number; inline?: Uint8Array }> {
-    // Every HTTP action uses a fresh object. Only the PNG is persisted for the widget.
-    const url = 'https://servo-http-preview.invalid/';
-    const readiness = { strategy: 'load', maxDurationMs: 5000 };
-    let documentSent = false;
-    const runtime = await createServoWorkerRuntime(servoWasm, {
-      url, width: 800, height: 600, readiness, scriptBudget: 5_000_000,
-      fetchImpl: async (input: string) => {
-        if (documentSent || String(input) !== url) return new Response(null, { status: 403 });
-        documentSent = true;
-        return new Response(html, { headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'",
-        } });
-      },
-      webSocketFactory: () => { throw new Error('HTTP previews are offline.'); },
-      maxSessionSubrequests: 32,
-    });
-    try {
-      const png: Uint8Array = await runtime.screenshot({ readiness });
-      if (!documentSent || !png.byteLength || png.byteLength > MAX_RESPONSE_BYTES) throw new Error('Invalid HTTP preview.');
-      const token = crypto.randomUUID();
-      this.ctx.storage.transactionSync(() => this.storeScreenshotChunks(token, png, Date.now() + SCREENSHOT_RETENTION_MS));
-      await this.scheduleNextAlarm();
-      return { token, byteLength: png.byteLength, inline: png.byteLength <= 96 * 1024 ? png : undefined };
-    } finally {
-      runtime.reset();
-    }
+    const png: Uint8Array = await renderOfflineHtmlPreview(servoWasm, html);
+    if (!png.byteLength || png.byteLength > MAX_RESPONSE_BYTES) throw new Error('Invalid HTTP preview.');
+    const token = crypto.randomUUID();
+    this.ctx.storage.transactionSync(() => this.storeScreenshotChunks(token, png, Date.now() + SCREENSHOT_RETENTION_MS));
+    await this.scheduleNextAlarm();
+    return { token, byteLength: png.byteLength, inline: png.byteLength <= 96 * 1024 ? png : undefined };
   }
 
-  async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
+    async publishWidgetScreenshot(png: Uint8Array): Promise<{ token: string }> {
     if (!(png instanceof Uint8Array) || png.byteLength === 0) throw new TypeError('Screenshot bytes are empty.');
     if (png.byteLength > MAX_RESPONSE_BYTES) throw new RangeError('Screenshot exceeds 8388608 bytes.');
     return this.serial(async () => {

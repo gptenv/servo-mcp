@@ -45,13 +45,43 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   createdRuntimes.push(runtime);
   return runtime;
 });
+const recordingPlanCaptureSpy = vi.fn((recording: { status: string; started_at: number; max_duration_ms: number; max_frames: number; fps: number }, now: number, initial = false, lastSlot: number | null = null) => {
+  if (recording.status !== 'recording') return { action: 'skip' };
+  const deadline = recording.started_at + recording.max_duration_ms;
+  if (!initial && now >= deadline) return { action: 'finish', stoppedAt: deadline };
+  const slot = initial ? 0 : Math.min(recording.max_frames - 1, Math.floor((now - recording.started_at) * recording.fps / 1000));
+  if (lastSlot !== null && slot <= lastSlot) return { action: 'skip' };
+  return { action: 'capture', slot, deadline };
+});
+const recordingPlanFinalizationSpy = vi.fn((recording: { status: string; started_at: number; max_duration_ms: number; max_frames: number; fps: number }, stoppedAt: number, lastSlot: number | null = null) => {
+  if (recording.status !== 'recording') return null;
+  const end = Math.min(stoppedAt, recording.started_at + recording.max_duration_ms);
+  const elapsed = Math.max(1, end - recording.started_at);
+  return { end, targetFrames: Math.min(recording.max_frames, Math.max(1, Math.ceil(elapsed * recording.fps / 1000), typeof lastSlot === 'number' ? lastSlot + 1 : 0)) };
+});
 vi.mock('./helpers/servo-worker-adapter.ts', () => ({
+  planServoRecordingCapture: recordingPlanCaptureSpy,
+  planServoRecordingFinalization: recordingPlanFinalizationSpy,
   createServoWorkerRuntime,
+  renderOfflineHtmlPreview: async (wasm: unknown, _html: string) => {
+    const url = 'https://servo-http-preview.invalid/';
+    const runtime = await createServoWorkerRuntime(wasm, {
+      url, width: 800, height: 600, readiness: { strategy: 'load', maxDurationMs: 5000 },
+      scriptBudget: 5_000_000, fetchImpl: async () => new Response(_html), webSocketFactory: () => {},
+      maxSessionSubrequests: 32,
+    });
+    try { return await runtime.screenshot({ readiness: { strategy: 'load', maxDurationMs: 5000 } }); }
+    finally { runtime.reset(); }
+  },
   createCloudflareServoBrowser: (wasm: unknown, _env: unknown, config: Record<string, unknown>) =>
     createServoWorkerRuntime(wasm, config),
 }));
 vi.mock('../src/vendor/servo-worker/servo_js_wasm.wasm', () => ({
   default: {},
+}));
+vi.mock('../src/cloudflare-browser', () => ({
+  createCloudflareServoBrowser: (wasm: unknown, _env: unknown, config: Record<string, unknown>) =>
+    createServoWorkerRuntime(wasm, config),
 }));
 vi.mock('../src/recording-encoder', () => ({ encodeRecordingMp4: vi.fn(async () => new Uint8Array([0, 0, 0, 0])) }));
 
@@ -637,6 +667,14 @@ describe('restore behaviour', () => {
 
   it('aborts restoration when the saved state cannot be applied', async () => {
     scriptRuntime({ resumeState: [{ evaluatePageReturns: false }] });
+    const session = await newSession();
+    seedActiveRow(sql(), Date.now() + 60_000);
+    seedSnapshot(sql(), makeSnapshotJson());
+    await expect(session.inspect()).rejects.toThrow(/could not apply the saved tab state/);
+  });
+
+  it('rejects a restore result that explicitly reports failure', async () => {
+    scriptRuntime({ resumeState: [{ pageResultValue: { Ok: { String: '{"restored":false}' } } }] });
     const session = await newSession();
     seedActiveRow(sql(), Date.now() + 60_000);
     seedSnapshot(sql(), makeSnapshotJson());
