@@ -692,7 +692,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
 
   private async applySavedState(runtime: ServoRuntime, snapshot: ResumeSnapshot, url: string, reapplying = false) {
     const result = await runtime.restoreResumeState(snapshot, url);
-    if (typeof result !== 'object' || result === null || !('restored' in result)) {
+    if (typeof result !== 'object' || result === null || !('restored' in result) || result.restored !== true) {
       const action = reapplying ? 'reapply' : 'apply';
       throw new Error(`Servo could not ${action} the saved tab state: ${JSON.stringify(result).slice(0, 512)}`);
     }
