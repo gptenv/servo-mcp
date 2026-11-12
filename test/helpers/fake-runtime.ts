@@ -695,7 +695,7 @@ export class FakeServoRuntime {
     this.calls.push(`scrollBy:${deltaX}:${deltaY}:${point?.x}:${point?.y}`);
   }
 
-  async screenshot(_options?: { fullPage?: boolean; maxDurationMs?: number }): Promise<Uint8Array> {
+  async screenshot(_options?: { fullPage?: boolean; maxDurationMs?: number; readiness?: unknown }): Promise<Uint8Array> {
     this.calls.push('screenshot');
     if (this.options.screenshotThrows) throw this.options.screenshotThrows;
     return this.options.screenshotPng ?? new Uint8Array([1, 2, 3]);
