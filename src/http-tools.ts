@@ -4,7 +4,7 @@ import { assertPublicHttpUrl } from './security';
 export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
 export type HttpMethod = typeof HTTP_METHODS[number];
 
-const MAX_REQUEST_BYTES = 1 * 1024 * 1024;
+export const MAX_HTTP_REQUEST_BYTES = 1 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_HEADERS = 64;
 
@@ -26,7 +26,7 @@ export const httpRequestSchema = z.object({
   url: z.string().url().max(2048),
   method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$/).default('GET'),
   headers: headersSchema.optional(),
-  body: z.string().max(MAX_REQUEST_BYTES).optional(),
+  body: z.string().max(MAX_HTTP_REQUEST_BYTES).optional(),
   followRedirects: z.boolean().default(true),
   maxResponseBytes: z.number().int().min(1).max(MAX_RESPONSE_BYTES).default(512 * 1024),
   maxDurationMs: z.number().int().min(100).max(15_000).default(10_000),
