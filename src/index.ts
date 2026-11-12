@@ -360,22 +360,24 @@ function createServer(env: Env, publicOrigin: string) {
     const widgetScreenshots: Array<{ actionIndex: number; mimeType: string; url: string; data?: string }> = [];
     // HTTP actions are browser actions: each action has an isolated Servo
     // session unless the caller explicitly selects an existing session ID.
-    const execution = await runSessions({ actions }, async (browser, action, created) => {
-      const response = requestHttp(action, await browser.requestHttp(action));
+    const execution = await runSessions({ actions },
+      async (browser, action) => requestHttp(action, await browser.requestHttp(action)),
+      (action) => ({ url: new URL(action.url).origin + '/' }),
+    );
+    await Promise.all(execution.responses.map(async (entry) => {
+      if (!entry.ok || !entry.response) return;
       try {
-        // Use a separate Servo render-only context for the response preview;
-        // never replace the caller's tab or repeat a mutating HTTP operation.
+        // Render a preview separately without changing or replaying the tab's request.
         const id = crypto.randomUUID();
-        const capture = await session(id).captureHttpPreview(httpPreviewHtml(response));
-        widgetScreenshots.push({ actionIndex: actions.indexOf(action), mimeType: 'image/png',
+        const capture = await session(id).captureHttpPreview(httpPreviewHtml(entry.response));
+        widgetScreenshots.push({ actionIndex: entry.actionIndex, mimeType: 'image/png',
           url: new URL('/screenshots/' + id + '/' + capture.token, publicOrigin).href,
           ...(capture.inline ? { data: toBase64(capture.inline) } : {}),
         });
       } catch {
         // Failed previews must not cause a completed request to be retried.
       }
-      return response;
-    }, (action) => ({ url: new URL(action.url).origin + '/' }));
+    }));
     return { kind: 'http', ...execution, widgetScreenshots };
   };
 
