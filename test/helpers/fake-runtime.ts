@@ -5,6 +5,8 @@
  */
 
 const isOpaqueHttpDocument = "globalThis.origin === 'null' && location.origin !== 'null'";
+const STORAGE_CAPTURE_CHUNK_CHARS = 32_768;
+const MAX_WEB_STORAGE_CAPTURE_CHARS = 512 * 1024;
 const MAX_INDEXEDDB_CAPTURE_BYTES = 2 * 1024 * 1024;
 const MAX_INDEXEDDB_CAPTURE_RECORDS = 5_000;
 
