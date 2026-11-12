@@ -944,6 +944,25 @@ describe('operate lifecycle', () => {
     expect(runtime.evaluations.some((entry) => entry.script.includes('document.documentElement?.outerHTML'))).toBe(true);
   });
 
+  it('extracts search HTML only after the navigated origin has been restored', async () => {
+    const html = '<html><body>restored</body></html>';
+    const session = await activeSession({ evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))": okString(JSON.stringify(html)),
+    } });
+    const events: string[] = [];
+    vi.spyOn(session as any, 'restoreNavigatedOrigin').mockImplementation(async () => { events.push('origin-restored'); });
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const evaluate = runtime.evaluate.bind(runtime);
+    vi.spyOn(runtime, 'evaluate').mockImplementation(async (source: string, options?: { maxDurationMs?: number }) => {
+      if (source.includes('document.documentElement?.outerHTML')) events.push('html-read');
+      return evaluate(source, options);
+    });
+    const result = await session.navigateAndReadHtml('https://search.example/results');
+    expect(result.html).toBe(html);
+    expect(events).toEqual(['origin-restored', 'html-read']);
+  });
+
   it('evaluates scripts and parses WebDriver-style results', async () => {
     const session = await activeSession({ evaluations: { 'document.title': okString('"served"') } });
     const result = await session.evaluate('document.title');
