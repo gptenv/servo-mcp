@@ -92,7 +92,8 @@
   window.addEventListener('pagehide', stopSizeReporting);
 
   function applyInput(params) {
-    const input = params?.arguments ?? params ?? {};
+    const supplied = params?.arguments ?? params ?? {};
+    const input = Array.isArray(supplied.actions) ? supplied.actions[0] ?? {} : supplied;
     if (input.query && queryField.dataset.userEdited !== '1') queryField.value = input.query;
     if (input.provider && providerField.dataset.userEdited !== '1') providerField.value = input.provider;
   }
@@ -100,10 +101,19 @@
     const list = document.querySelector('#results');
     list.replaceChildren();
     if (!result) return;
-    const results = result.results ?? [];
-    document.querySelector('#status').textContent = results.length
+    const entries = Array.isArray(result.responses) ? result.responses : null;
+    const results = entries
+      ? entries.filter((entry) => entry.ok).flatMap((entry) => entry.response?.results ?? [])
+      : result.results ?? [];
+    const failed = entries ? entries.filter((entry) => !entry.ok) : [];
+    const successfulCount = entries ? entries.length - failed.length : 1;
+    const message = results.length
       ? results.length + ' result' + (results.length === 1 ? '' : 's')
+        + (entries ? ' across ' + successfulCount + ' successful search action' + (successfulCount === 1 ? '' : 's') : '')
       : 'No results found.';
+    const failures = failed.map((entry) => 'Action ' + (entry.actionIndex + 1)
+      + ': ' + (entry.error ?? 'Search failed'));
+    document.querySelector('#status').textContent = [message, ...failures].join('; ');
     for (const item of results) {
       const li = document.createElement('li');
       const link = document.createElement('a');
@@ -181,7 +191,7 @@
     status.textContent = 'Searching…';
     try {
       await ready;
-      const args = { query, provider: providerField.value, limit: 8 };
+      const args = { actions: [{ query, provider: providerField.value, limit: 8 }] };
       const fallback = () => withDeadline(window.openai.callTool('servo_web_search', args), 30_000);
       let result;
       if (!bridgeInitialized && typeof window.openai?.callTool === 'function') {

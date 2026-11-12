@@ -9,8 +9,8 @@ import { assertPublicHttpUrl } from './security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, httpPreviewHtml, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser-v4.html';
-const HTTP_WIDGET_URI = 'ui://servo/http-v3.html';
-const SEARCH_WIDGET_URI = 'ui://servo/search-v4.html';
+const HTTP_WIDGET_URI = 'ui://servo/http-v4.html';
+const SEARCH_WIDGET_URI = 'ui://servo/search-v5.html';
 const WIDGET_INLINE_SCREENSHOT_BYTES = 96 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 const MAX_FONT_BASE64_BYTES = 44_739_244;
@@ -166,16 +166,16 @@ function errorResult(error: unknown) {
 }
 
 function createServer(env: Env, publicOrigin: string) {
-  const server = new McpServer({ name: 'servo-mcp', version: '0.5.1' }, {
+  const server = new McpServer({ name: 'servo-mcp', version: '0.6.0' }, {
     instructions: [
       'Each Servo session is one independent browser tab. Omit sessionID or use a falsy value on an action to create a new tab automatically and perform that action. There is no standalone session creation tool. Keep a mapping from a short description to its returned sessionID, and pass that exact ID on the action as sessionID for later operations. Every tool returns an ordered top-level responses array with one response object per action, plus metadata counts for all actions. Each focused browser tool runs its action entries concurrently. Sessions expire automatically after 30 days without use.',
       'The live WASM runtime has no application-level idle hold. After a browser tool call and snapshot writes finish, Cloudflare can hibernate the Durable Object; a later call restores the selected session from its persisted snapshot. No prior tool actions are replayed, and JavaScript heap state is not preserved.',
       'Screen recordings capture the viewport as low-frame-rate H.264 MP4 without audio. Start with servo_recording_start, browse while it records, stop with servo_recording_stop, check asynchronous encoding with servo_recording_status, then get a direct download link with servo_recording_download. The Durable Object stays active while a recording is running, which can add duration charges; recordings default to 2 fps and 30 seconds and are capped at 3 fps and 60 seconds. Up to three completed recordings per tab are kept for 24 hours. Download URLs are bearer links; do not share them.',
-      'Each tool keeps one focused purpose. Every browser action accepts an actions array of objects, each with an optional sessionID; servo_navigate actions contain a URL or inline HTML and servo_click actions contain independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident. Supplied IDs must already exist; unknown, closed, or expired IDs are never replaced with new tabs. Initial width and height options apply only when an action has no truthy sessionID. Status accepts the same arrays and reports whether existing runtimes are available; HTTP tools do not use browser sessions.',
+      'Each tool keeps one focused purpose. Every browser action accepts an actions array of objects, each with an optional sessionID; servo_navigate actions contain a URL or inline HTML and servo_click actions contain independent coordinates. To run dependent actions on one tab, call the focused tools in order. Browser operations automatically reopen saved tabs when their WASM runtime is not resident. Supplied IDs must already exist; unknown, closed, or expired IDs are never replaced with new tabs. Initial width and height options apply only when an action has no truthy sessionID. Status accepts the same arrays and reports whether existing runtimes are available; HTTP and search tools also create or reuse real Servo browser sessions.',
       'Snapshots preserve the current URL, viewport, scroll position, common form values, every localStorage and sessionStorage entry, the full cookie jar including HttpOnly cookies, IndexedDB schemas and records for each visited origin, and registered fonts. Restoring reloads the page so page scripts run again; JavaScript heap state, browser history, and arbitrary in-memory DOM/application state are not restored. Cache Storage remains runtime-local and incomplete. Sessions expire after 30 days without use.',
       'A sessionId is a bearer capability because this public MCP server currently has no authentication. Do not share it. Only navigate to public HTTP(S) pages; private/local network targets are blocked.',
       'servo_click, servo_type_text, servo_press_key, and servo_evaluate may cause page-side effects. Use them only for actions the user requested, and do not repeat a call merely because its response was unclear.',
-      'HTTP request tools make outbound requests to public HTTP(S) URLs. They accept custom request headers and bounded text bodies, follow at most five redirects while rechecking each destination, and return status, response headers, body data, and citation-style page results. Requests can cause remote side effects; use the requested method and endpoint only.',
+      'HTTP request tools run in-page fetch() inside Servo WASM, with browser origin/CORS, cookies, and redirects. Each request accepts an optional sessionID in its action; new sessions first load the target origin. Web searches also accept batched actions, visiting providers sequentially in a tab and running independent tabs concurrently. Mutating requests can cause remote side effects and are not automatically retried.',
       'Servo capabilities are partial. Use servo_get_capabilities and inspect returned errors before concluding a page is broken.',
     ].join(' '),
   });
@@ -191,6 +191,7 @@ function createServer(env: Env, publicOrigin: string) {
     ['servo-browser-ui-v3', 'ui://servo/browser-v3.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-v2', 'ui://servo/browser-v2.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
     ['servo-browser-ui-original', 'ui://servo/browser.html', 'Servo browser controls', 'Load and inspect a page with Servo.'],
+    ['servo-http-ui-v3', 'ui://servo/http-v3.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui-v2', 'ui://servo/http-v2.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui-v1', 'ui://servo/http-v1.html', 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
     ['servo-http-ui', HTTP_WIDGET_URI, 'Servo HTTP response', 'Inspect status and content returned by an HTTP request.'],
@@ -205,7 +206,7 @@ function createServer(env: Env, publicOrigin: string) {
     }] }));
   }
 
-  for (const [name, uri] of [['servo-web-search-ui', SEARCH_WIDGET_URI], ['servo-web-search-ui-v3', 'ui://servo/search-v3.html']]) {
+  for (const [name, uri] of [['servo-web-search-ui', SEARCH_WIDGET_URI], ['servo-web-search-ui-v4', 'ui://servo/search-v4.html'], ['servo-web-search-ui-v3', 'ui://servo/search-v3.html']]) {
     server.registerResource(name, uri, {
       title: 'Servo web search',
       description: 'Search the public web and inspect ranked results.',
@@ -236,19 +237,27 @@ function createServer(env: Env, publicOrigin: string) {
     'openai/outputTemplate': SEARCH_WIDGET_URI,
   };
 
+  const searchActionSchema = z.object({
+    sessionID: z.union([z.string().uuid(), z.literal(null), z.literal(false), z.literal(0), z.literal('')]).optional()
+      .describe('Reuse this Servo tab, or omit/use a falsy value to create a new independent tab for this search action.'),
+    width: z.number().int().min(320).max(1920).optional(),
+    height: z.number().int().min(240).max(1600).optional(),
+    query: z.string().trim().min(1).max(512),
+    limit: z.number().int().min(1).max(10).default(8),
+    provider: z.enum(['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
+  }).strict();
+
   server.registerTool('servo_web_search', {
     title: 'Servo web search',
-    description: 'Search the public web across Brave, Google, Bing, DuckDuckGo, and Yandex. Results are best-effort: public providers may block automated requests or return no parseable results. The response reports successful and failed providers; inspect results with servo_navigate before relying on them.',
-    inputSchema: z.object({
-      query: z.string().trim().min(1).max(512),
-      limit: z.number().int().min(1).max(10).default(8),
-      provider: z.enum(['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all']).default('auto'),
-    }).strict(),
+    description: 'Run multiple web searches in separate Servo WASM browser sessions. Each actions entry has its own query/provider and optional sessionID; omitted or falsy IDs create independent new tabs. Entries run concurrently and return their session IDs. Each provider within one search action runs sequentially in that action tab, preserving browser origin, cookies and navigation state. Results are best-effort.',
+    inputSchema: z.object({ actions: z.array(searchActionSchema).min(1).max(20) }).strict(),
     _meta: searchUiMeta,
-  }, async ({ query, limit, provider }) => safely(async () => ({
-    query,
-    provider,
-    ...(await searchWeb(query, limit, provider)),
+  }, async (input) => safely(async () => runSessions(input, async (browser, action) => {
+    const data = await searchWeb(action.query, async (url) => {
+      const page = await browser.navigateAndReadHtml(url.href);
+      return page.html;
+    }, action.limit, action.provider);
+    return { query: action.query, provider: action.provider, ...data };
   })));
 
   type SessionGroup = { width?: number; height?: number };
@@ -358,30 +367,32 @@ function createServer(env: Env, publicOrigin: string) {
   };
   const runHttpActions = async (actions: Array<z.infer<typeof httpRequestSchema>>) => {
     const widgetScreenshots: Array<{ actionIndex: number; mimeType: string; url: string; data?: string }> = [];
-    const responses = await Promise.all(actions.map(async (action, actionIndex) => {
+    // HTTP actions are browser actions: each action has an isolated Servo
+    // session unless the caller explicitly selects an existing session ID.
+    const execution = await runSessions({ actions },
+      async (browser, action) => requestHttp(action, await browser.requestHttp(action)),
+      (action) => ({ url: assertPublicHttpUrl(action.url).origin + '/' }),
+    );
+    await Promise.all(execution.responses.map(async (entry) => {
+      if (!entry.ok || !('response' in entry) || !entry.response) return;
       try {
-        const response = await requestHttp(action);
-        try {
-          const id = crypto.randomUUID();
-          const capture = await session(id).captureHttpPreview(httpPreviewHtml(response));
-          widgetScreenshots.push({ actionIndex, mimeType: 'image/png',
-            url: new URL(`/screenshots/${id}/${capture.token}`, publicOrigin).href,
-            ...(capture.inline ? { data: toBase64(capture.inline) } : {}),
-          });
-        } catch {
-          // A failed preview must never cause a completed request to be retried.
-        }
-        return { actionIndex, ok: true, response };
-      } catch (error) {
-        return { actionIndex, ok: false, request: { method: action.method, url: action.url }, ...sessionError(error) };
+        // Render a preview separately without changing or replaying the tab's request.
+        const id = crypto.randomUUID();
+        const capture = await session(id).captureHttpPreview(httpPreviewHtml(entry.response));
+        widgetScreenshots.push({ actionIndex: entry.actionIndex, mimeType: 'image/png',
+          url: new URL('/screenshots/' + id + '/' + capture.token, publicOrigin).href,
+          ...(capture.inline ? { data: toBase64(capture.inline) } : {}),
+        });
+      } catch {
+        // Failed previews must not cause a completed request to be retried.
       }
     }));
-    return { kind: 'http', responses, widgetScreenshots };
+    return { kind: 'http', ...execution, widgetScreenshots };
   };
 
   server.registerTool('servo_http_request', {
     title: 'Servo HTTP request',
-    description: 'Send an array of public HTTP(S) requests. Each actions entry accepts any valid Fetch API method (including custom extension methods), optional custom request headers and UTF-8 body, redirect policy, timeout, and response-size limit. Returns one response object per request with status, response headers, body (or base64 for binary), and citation-style page results. CONNECT, TRACE, and TRACK are forbidden by the Fetch API.',
+    description: 'Send HTTP(S) requests using a real Servo WASM browser session. Supply sessionID to reuse a tab, or omit it to create a tab at the request origin before performing in-page fetch(). Browser CORS, cookies, redirects and access controls apply; a new session makes an initial GET to the origin. Credential-bearing headers are rejected because page scripts can intercept fetch arguments; the tab origin must match the target URL. Returns the sessionID with status, headers, body and citation-style results.',
     inputSchema: z.object({ actions: z.array(httpRequestSchema.strict()).min(1).max(20) }).strict(),
     _meta: httpUiMeta,
   }, async ({ actions }) => safely(() => runHttpActions(actions)));
@@ -390,7 +401,7 @@ function createServer(env: Env, publicOrigin: string) {
     const name = `servo_http_${method.toLowerCase()}`;
     server.registerTool(name, {
       title: `Servo HTTP ${method}`,
-      description: `Send an array of ${method} requests to public HTTP(S) URLs with optional custom request headers${['GET', 'HEAD'].includes(method) ? '' : ' and UTF-8 body'}. Returns one response object per request with status, headers, bounded body data, and citation-style page results.`,
+      description: `Perform ${method} requests through Servo browser fetch() in a selected or automatically created session. Browser CORS and cookie policy apply. New sessions first navigate to the destination origin. Returns the resulting sessionID with status, headers and bounded response body.`,
       inputSchema: z.object({ actions: z.array(httpVerbRequestSchema.strict()).min(1).max(20) }).strict(),
       _meta: httpUiMeta,
     }, async ({ actions }) => safely(() => runHttpActions(actions.map((action) => ({ ...action, method })))));

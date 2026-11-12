@@ -45,58 +45,74 @@ describe('search parsers', () => {
   });
 });
 
-describe('searchWeb', () => {
-  it('validates the query before making a request', async () => {
-    await expect(searchWeb('   ')).rejects.toThrow('must not be empty');
-    await expect(searchWeb('x'.repeat(513))).rejects.toThrow('exceeds 512');
+describe("searchWeb via the caller's Servo HTML loader", () => {
+  const searchFixture = async (url: URL): Promise<string> => {
+    if (url.hostname === 'search.brave.com') {
+      return '<div class="snippet"><a href="https://brave.example"><div class="title search-snippet-title" title="Brave result">Brave result</div></a><div class="content">Brave</div></div>';
+    }
+    if (url.hostname === 'www.google.com') {
+      return '<html><a href="/url?q=https%3A%2F%2Fexample.com%2Fgoogle-result"><h3>Google result</h3></a></html>';
+    }
+    if (url.hostname === 'www.bing.com') {
+      return '<rss><channel><item><title>Bing result</title><link>https://bing.example</link><description>Bing</description></item></channel></rss>';
+    }
+    if (url.hostname === 'html.duckduckgo.com') {
+      return '<a class="result__a" href="https://ddg.example">DDG result</a><div class="result__snippet">DDG</div>';
+    }
+    throw new Error('Provider is unavailable');
+  };
+
+  it('validates the query before loading a browser document', async () => {
+    const loader = vi.fn(searchFixture);
+    await expect(searchWeb('   ', loader)).rejects.toThrow('must not be empty');
+    await expect(searchWeb('x'.repeat(513), loader)).rejects.toThrow('exceeds 512');
+    expect(loader).not.toHaveBeenCalled();
   });
 
-  it('queries all providers in auto mode and tolerates individual failures', async () => {
-    const fetchMock = vi.fn(async (url: URL) => {
-      if (url.hostname === 'search.brave.com') {
-        return new Response('<div class="snippet"><a href="https://brave.example"><div class="title search-snippet-title" title="Brave result">Brave result</div></a><div class="content">Brave</div></div>', { status: 200 });
+  it('queries five providers sequentially inside the same Servo tab and tolerates failures', async () => {
+    const order: string[] = [];
+    let inFlight = 0;
+    let concurrent = false;
+    const loader = vi.fn(async (url: URL) => {
+      if (++inFlight > 1) concurrent = true;
+      order.push(url.hostname);
+      await Promise.resolve();
+      try {
+        return await searchFixture(url);
+      } finally {
+        inFlight--;
       }
-      if (url.hostname === 'www.google.com') {
-        return new Response('<html><a href="/url?q=https%3A%2F%2Fexample.com%2Fgoogle-result"><h3>Google result</h3></a></html>', { status: 200 });
-      }
-      if (url.hostname === 'www.bing.com') {
-        return new Response('<rss><channel><item><title>Bing result</title><link>https://bing.example</link><description>Bing</description></item></channel></rss>', { status: 200 });
-      }
-      if (url.hostname === 'html.duckduckgo.com') {
-        return new Response('<a class="result__a" href="https://ddg.example">DDG result</a><div class="result__snippet">DDG</div>', { status: 200 });
-      }
-      return new Response('nope', { status: 503 });
     });
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await searchWeb('servo wasm', 8, 'auto');
-    expect(result.results.map((item) => item.provider)).toEqual(['brave', 'google', 'bing', 'duckduckgo']);
-    expect(result.providers).toEqual(['brave', 'google', 'bing', 'duckduckgo']);
-    expect(result.failedProviders).toEqual(['yandex']);
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    vi.unstubAllGlobals();
+    const workerFetch = vi.fn(() => { throw new Error('Search must not invoke Worker fetch'); });
+    vi.stubGlobal('fetch', workerFetch);
+    try {
+      const result = await searchWeb('servo wasm', loader, 8, 'auto');
+      expect(result.results.map((item) => item.provider)).toEqual(['brave', 'google', 'bing', 'duckduckgo']);
+      expect(result.providers).toEqual(['brave', 'google', 'bing', 'duckduckgo']);
+      expect(result.failedProviders).toEqual(['yandex']);
+      expect(order).toEqual(['search.brave.com', 'www.google.com', 'www.bing.com', 'html.duckduckgo.com', 'yandex.com']);
+      expect(concurrent).toBe(false);
+      expect(workerFetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
-  it('can target one provider', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
-      '<rss><channel><item><title>Example</title><link>https://example.com</link><description>Example result</description></item></channel></rss>',
-      { status: 200 },
-    )));
-    const result = await searchWeb('servo', 2, 'bing');
-    expect(result.results).toEqual([{ title: 'Example', url: 'https://example.com', snippet: 'Example result', provider: 'bing' }]);
-    vi.unstubAllGlobals();
+  it('can target one search provider in a reusable browser', async () => {
+    const loader = vi.fn(searchFixture);
+    const result = await searchWeb('servo', loader, 2, 'bing');
+    expect(result.results).toEqual([{ title: 'Bing result', url: 'https://bing.example', snippet: 'Bing', provider: 'bing' }]);
+    expect(loader).toHaveBeenCalledTimes(1);
   });
 
-  it('returns an empty result set when providers respond but yield no parseable results', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html>blocked</html>', { status: 200 })));
-    await expect(searchWeb('servo', 8, 'duckduckgo')).resolves.toEqual({
+  it('returns an empty result set when the browser loaded a blocked page', async () => {
+    await expect(searchWeb('servo', async () => '<html>blocked</html>', 8, 'duckduckgo')).resolves.toEqual({
       results: [], providers: ['duckduckgo'], failedProviders: [],
     });
-    vi.unstubAllGlobals();
   });
 
-  it('throws when every selected provider fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 503 })));
-    await expect(searchWeb('servo', 8, 'all')).rejects.toThrow('All selected web search providers failed');
-    vi.unstubAllGlobals();
+  it('fails when all requested provider navigations fail', async () => {
+    await expect(searchWeb('servo', async () => { throw new Error('navigation failed'); }, 8, 'all'))
+      .rejects.toThrow('All selected web search providers failed');
   });
 });

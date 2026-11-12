@@ -1,7 +1,6 @@
 const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 10;
 const MAX_QUERY_LENGTH = 512;
-const SEARCH_TIMEOUT_MS = 8_000;
 
 export const SEARCH_PROVIDERS = ['auto', 'brave', 'google', 'bing', 'duckduckgo', 'yandex', 'all'] as const;
 export type SearchProvider = typeof SEARCH_PROVIDERS[number];
@@ -158,14 +157,6 @@ const endpoints: Record<Provider, (query: string, limit: number) => URL> = {
   },
 };
 
-const providerHeaders: Record<Provider, Record<string, string>> = {
-  brave: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Mozilla/5.0 (compatible; Servo-MCP/0.5; +https://github.com/gptenv/servo-mcp)' },
-  google: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Servo-MCP/0.5' },
-  bing: { Accept: 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8', 'User-Agent': 'Servo-MCP/0.5' },
-  duckduckgo: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Servo-MCP/0.5' },
-  yandex: { Accept: 'text/html,application/xhtml+xml', 'User-Agent': 'Servo-MCP/0.5' },
-};
-
 export function dedupeResults(results: WebSearchResult[], limit = DEFAULT_LIMIT): WebSearchResult[] {
   const seen = new Set<string>();
   const unique: WebSearchResult[] = [];
@@ -179,23 +170,18 @@ export function dedupeResults(results: WebSearchResult[], limit = DEFAULT_LIMIT)
   return unique;
 }
 
-async function searchProvider(provider: Provider, query: string, limit: number): Promise<WebSearchResult[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(endpoints[provider](query, limit), {
-      headers: providerHeaders[provider],
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(provider + ' search returned HTTP ' + response.status + '.');
-    return parsers[provider](await response.text(), limit);
-  } finally {
-    clearTimeout(timeout);
-  }
+/** Search providers are loaded by the caller's real Servo browsing session. */
+export type SearchHtmlLoader = (url: URL, provider: Provider) => Promise<string>;
+
+async function searchProvider(
+  provider: Provider, query: string, limit: number, loadHtml: SearchHtmlLoader,
+): Promise<WebSearchResult[]> {
+  return parsers[provider](await loadHtml(endpoints[provider](query, limit), provider), limit);
 }
 
 export async function searchWeb(
   query: string,
+  loadHtml: SearchHtmlLoader,
   limit = DEFAULT_LIMIT,
   provider: SearchProvider = 'auto',
 ): Promise<{ results: WebSearchResult[]; providers: string[]; failedProviders: string[] }> {
@@ -208,19 +194,21 @@ export async function searchWeb(
     ? ['brave', 'google', 'bing', 'duckduckgo', 'yandex']
     : [provider];
 
-  const settled = await Promise.allSettled(selected.map((name) => searchProvider(name, trimmed, count)));
+  // A search action owns one tab. Providers navigate that tab in sequence,
+  // while separate MCP actions execute concurrently in distinct tabs.
+  // Never load providers concurrently into the same browsing context.
   const successful: WebSearchResult[] = [];
   const providers: string[] = [];
   const failedProviders: string[] = [];
-  settled.forEach((result, index) => {
-    const name = selected[index];
-    if (result.status === 'fulfilled') {
+  for (const name of selected) {
+    try {
+      const matches = await searchProvider(name, trimmed, count, loadHtml);
       providers.push(name);
-      successful.push(...result.value);
-    } else {
+      successful.push(...matches);
+    } catch {
       failedProviders.push(name);
     }
-  });
+  }
 
   if (successful.length === 0 && providers.length === 0) {
     throw new Error('All selected web search providers failed: ' + failedProviders.join(', ') + '.');

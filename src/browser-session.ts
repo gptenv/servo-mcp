@@ -2,7 +2,9 @@ import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import servoWasm from './vendor/servo-worker/servo_js_wasm.wasm';
 import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
-import { assertPublicHttpUrl, assertPublicWebSocketUrl } from './security';
+import { createCloudflareServoBrowser } from './vendor/servo-worker/worker-adapter.mjs';
+import { assertPublicHttpUrl } from './security';
+import { type HttpRequest, type ServoHttpResponse } from './http-tools';
 
 const MAX_PERSISTED_HTML_BYTES = 1 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 64 * 1024;
@@ -299,15 +301,6 @@ function parseEvaluationResult(result: unknown): unknown {
   const value = (result as { Ok?: { String?: unknown } }).Ok?.String;
   if (typeof value !== 'string') return result;
   try { return JSON.parse(value); } catch { return result; }
-}
-
-async function publicFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const url = assertPublicHttpUrl(input instanceof Request ? input.url : String(input));
-  return fetch(url, { ...init, redirect: 'manual' });
-}
-
-function publicWebSocket(url: string, protocols?: string | string[]): WebSocket {
-  return new WebSocket(assertPublicWebSocketUrl(url), protocols);
 }
 
 async function pump(runtime: ServoRuntime): Promise<void> {
@@ -1013,18 +1006,17 @@ export class ServoBrowserSession extends DurableObject<Env> {
   }
 
   // URL-based initialization passes its URL to the adapter bootstrap; do not queue a second loadPage().
+
   private async createRuntime(width: number, height: number, sessionId: string, savedCookieState?: string, initialUrl = 'about:blank', readiness?: PageReadinessOptions): Promise<ServoRuntime> {
-    const runtime = await createServoWorkerRuntime(servoWasm, {
+    const runtime = await createCloudflareServoBrowser(servoWasm, this.env, {
       width,
       height,
       url: initialUrl,
       readiness: readiness ?? {},
-      fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => publicFetch(input, init).catch((error: unknown) => {
-        const url = input instanceof Request ? input.url : String(input);
-        this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
-        throw error;
-      }),
-      webSocketFactory: publicWebSocket,
+      onNetworkResult: (url: string, status: number | null, error: unknown) => {
+        if (error !== null) this.fetchFailures.set(url, error instanceof Error ? error.message : String(error));
+        else if (status !== null && status >= 400) this.fetchFailures.set(url, 'HTTP ' + status);
+      },
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxSubrequests: 50,
       log: (message: string) => console.error(`[servo:${sessionId}] ${message.slice(0, 2048)}`),
@@ -1164,7 +1156,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
     return this.runtime;
   }
 
-  private async operate<T>(operation: (runtime: ServoRuntime) => Promise<T>): Promise<T> {
+  private async operate<T>(
+    operation: (runtime: ServoRuntime) => Promise<T>,
+    afterOriginRestore?: (runtime: ServoRuntime, result: Awaited<T>) => Promise<Awaited<T>>,
+  ): Promise<T> {
     return this.serial(async () => {
       this.fetchFailures.clear();
       const runtime = await this.requireRuntime();
@@ -1173,7 +1168,10 @@ export class ServoBrowserSession extends DurableObject<Env> {
         let result: Awaited<T> = await operation(runtime);
         const resultObject = typeof result === 'object' && result !== null ? result as Record<string, unknown> : undefined;
         const resultPage = resultObject && 'page' in resultObject ? resultObject.page as PageSummary : resultObject as PageSummary | undefined;
-        const currentUrl = typeof resultPage?.url === 'string' ? resultPage.url : await pageUrl(runtime);
+        // An HTTP response also has a URL. Never mistake response metadata for
+        // the active browsing document's origin when deciding which saved
+        // storage to restore. Only the Servo browsing context is authoritative.
+        const currentUrl = await pageUrl(runtime);
         if (new URL(previousUrl).origin !== new URL(currentUrl).origin) {
           await this.restoreNavigatedOrigin(runtime, currentUrl);
           const restoredPage = await this.summary(runtime);
@@ -1183,6 +1181,7 @@ export class ServoBrowserSession extends DurableObject<Env> {
             result = restoredPage as Awaited<T>;
           }
         }
+        if (afterOriginRestore) result = await afterOriginRestore(runtime, result);
         return result;
       } finally {
         if (this.runtime === runtime && this.row()?.status === 'active') {
@@ -1296,6 +1295,38 @@ export class ServoBrowserSession extends DurableObject<Env> {
       await runtime.navigateHtml(html, { readiness });
       await this.storeAsset('initial-html', html);
       return { action: 'navigate', page: await this.summary(runtime) };
+    });
+  }
+
+  /**
+   * Run HTTP requests inside the current Servo browsing context, preserving
+   * Servo's cookie jar, origin, redirect behavior, and CORS enforcement.
+   */
+  async requestHttp(input: HttpRequest): Promise<ServoHttpResponse> {
+    const url = assertPublicHttpUrl(input.url).href;
+    return this.operate(async runtime => runtime.requestHttp({ ...input, url }) as Promise<ServoHttpResponse>);
+  }
+
+  /**
+   * Navigate a real Servo tab and parse its final DOM after any saved
+   * per-origin state was restored. Keep navigation, restoration and extraction
+   * inside the same serialized operation to prevent interleaved actions.
+   */
+  async navigateAndReadHtml(url: string): Promise<{ html: string; page: PageSummary }> {
+    assertPublicHttpUrl(url);
+    return this.operate(async (runtime) => {
+      await runtime.navigate(url, { maxDurationMs: 5000 });
+      const page = await this.summary(runtime);
+      if (page.loadError) throw new Error(page.loadError);
+      return { html: '', page };
+    }, async (runtime) => {
+      const page = await this.summary(runtime);
+      if (page.loadError) throw new Error(page.loadError);
+      const html = parseEvaluationResult(await runtime.evaluate(
+        "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))",
+      ));
+      if (typeof html !== 'string') throw new Error('Servo did not return the document HTML.');
+      return { html, page };
     });
   }
 

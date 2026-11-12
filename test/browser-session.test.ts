@@ -45,7 +45,11 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   createdRuntimes.push(runtime);
   return runtime;
 });
-vi.mock('./helpers/servo-worker-adapter.ts', () => ({ createServoWorkerRuntime }));
+vi.mock('./helpers/servo-worker-adapter.ts', () => ({
+  createServoWorkerRuntime,
+  createCloudflareServoBrowser: (wasm: unknown, _env: unknown, config: Record<string, unknown>) =>
+    createServoWorkerRuntime(wasm, config),
+}));
 vi.mock('../src/vendor/servo-worker/servo_js_wasm.wasm', () => ({
   default: {},
 }));
@@ -107,7 +111,9 @@ function initOptions(extra: Record<string, unknown> = {}) {
 
 async function newSession(idString = 'session-do-id') {
   state = createFakeDurableObjectState(idString);
-  return new mod.ServoBrowserSession(asDoState(state), {} as Env);
+  return new mod.ServoBrowserSession(asDoState(state), {
+    MESH: { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+  } as unknown as Env);
 }
 
 const sql = () => state.storage.sql as unknown as import('./helpers/fake-sql').FakeSqlDatabase;
@@ -182,8 +188,8 @@ describe('runtime configuration wiring', () => {
     expect(config.url).toBe('about:blank');
     expect(config.maxResponseBytes).toBe(8 * 1024 * 1024);
     expect(config.maxSubrequests).toBe(50);
-    expect(typeof config.fetchImpl).toBe('function');
-    expect(typeof config.webSocketFactory).toBe('function');
+    expect(typeof config.onNetworkResult).toBe('function');
+    expect(config.readiness).toEqual({});
     // console.error receives a single already-formatted string argument.
     const log = config.log as (message: string) => void;
     log('short message');
@@ -198,40 +204,26 @@ describe('runtime configuration wiring', () => {
     expect(String(longCall![0])).toBe(`[servo:logged-session] ${'x'.repeat(2048)}`);
   });
 
-  it('routes host fetches through the public-URL policy with manual redirects', async () => {
+  it('records network failures reported by the Cloudflare Servo factory', async () => {
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await session.initialize(initOptions());
-    const fetchImpl = runtimeConfigs[0].fetchImpl as (input: Request | string) => Promise<Response>;
-    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
-      fetchImplSpy(init);
-      return { status: 200 } as Response;
-    }));
-    const requestResponse = await fetchImpl(new Request('https://public.example/request'));
-    expect(requestResponse.status).toBe(200);
-    expect(fetchImplSpy.mock.calls[0][0]).toEqual({ redirect: 'manual' });
-    fetchImplSpy.mockClear();
-    const response = await fetchImpl('https://public.example/api');
-    expect(response.status).toBe(200);
-    expect(fetchImplSpy.mock.calls[0][0]).toEqual({ redirect: 'manual' });
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('host fetch failed'); }));
-    await expect(fetchImpl('https://public.example/failure')).rejects.toThrow('host fetch failed');
+    const onNetworkResult = runtimeConfigs[0].onNetworkResult as (url: string, status: number | null, error: unknown) => void;
+    expect(typeof onNetworkResult).toBe('function');
+    onNetworkResult('https://public.example/failure', null, new Error('host fetch failed'));
     expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/failure')).toBe('host fetch failed');
-    await expect(fetchImpl(new Request('https://public.example/request-failure'))).rejects.toThrow('host fetch failed');
-    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/request-failure')).toBe('host fetch failed');
-    await expect(fetchImpl('http://127.0.0.1/x')).rejects.toThrow(TypeError);
-    vi.unstubAllGlobals();
+    onNetworkResult('https://public.example/plain', null, 'plain rejection');
+    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/plain')).toBe('plain rejection');
+    onNetworkResult('https://public.example/http-error', 404, null);
+    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/http-error')).toBe('HTTP 404');
   });
 
-  it('creates WebSockets only for public ws:// targets', async () => {
+  it('does not expose an MCP-owned Mesh fetch or WebSocket factory (network is owned by the Servo factory)', async () => {
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await session.initialize(initOptions());
-    const factory = runtimeConfigs[0].webSocketFactory as (url: string) => unknown;
-    vi.stubGlobal('WebSocket', webSocketFactorySpy);
-    expect(factory('ws://public.example/socket')).toEqual({ fake: true });
-    expect(() => factory('ws://localhost/socket')).toThrow(TypeError);
-    vi.unstubAllGlobals();
+    expect(runtimeConfigs[0].fetchImpl).toBeUndefined();
+    expect(runtimeConfigs[0].webSocketFactory).toBeUndefined();
   });
 });
 
@@ -734,8 +726,8 @@ describe('operate lifecycle', () => {
       summary: () => ({ url: pumpCalls === 0 ? 'https://public.example/before' : url }),
       pumpFactory: async () => {
         if (pumpCalls++ === 0) {
-          const fetchPage = runtimeConfigs.at(-1)!.fetchImpl as typeof fetch;
-          await expect(fetchPage(url)).rejects.toBe(rejection);
+          const onNetworkResult = runtimeConfigs.at(-1)!.onNetworkResult as (url: string, status: number | null, error: unknown) => void;
+          onNetworkResult(url, null, rejection);
         }
         return { settled: true };
       },
@@ -877,6 +869,119 @@ describe('operate lifecycle', () => {
   it('reports reload failures', async () => {
     const session = await activeSession({ reloadReturns: false });
     await expect(session.reload()).rejects.toThrow(/could not reload the current page/);
+  });
+
+  it('executes HTTP calls in the Servo page runtime instead of Worker fetch', async () => {
+    const body = Buffer.from('{"answer":42}').toString('base64');
+    const session = await activeSession({ summary: { url: 'https://public.example/page' }, evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      '(async () => {\n  const request = ': okString({
+        status: 200, statusText: 'OK', url: 'https://public.example/api',
+        redirected: false, headers: { 'content-type': 'application/json' },
+        bodyBase64: body, bodyBytes: 13, truncated: false,
+      }),
+    } });
+    const result = await session.requestHttp({
+      url: 'https://public.example/api', method: 'POST',
+      headers: { 'X-Test-Header': 'safe-fixture' }, body: '{"hello":true}',
+      followRedirects: true, maxResponseBytes: 1024, maxDurationMs: 10000,
+    });
+    expect(result).toMatchObject({ status: 200, url: 'https://public.example/api', bodyBase64: body });
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const script = runtime.evaluations.find((entry) => entry.script.startsWith('(async () => {\n  const request = '))?.script;
+    expect(script).toContain('fetch(request.url');
+    expect(script).toContain('"method":"POST"');
+    expect(fetchImplSpy).not.toHaveBeenCalled();
+    await expect(session.requestHttp({
+      url: 'https://public.example/api', method: 'GET',
+      headers: { Authorization: 'Bearer fixture-only' },
+      followRedirects: true, maxResponseBytes: 10, maxDurationMs: 5000,
+    })).rejects.toThrow(/cannot carry Authorization/);
+    await expect(session.requestHttp({
+      url: 'http://127.0.0.1/', method: 'GET', followRedirects: true,
+      maxResponseBytes: 10, maxDurationMs: 5000,
+    })).rejects.toThrow(/Private, local/);
+  });
+
+  it('does not restore another origin when an HTTP response URL differs from the tab origin', async () => {
+    const session = await activeSession({ summary: { url: 'https://public.example/page' }, evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      '(async () => {\n  const request = ': okString({
+        status: 200, statusText: 'OK', url: 'https://other.example/resource',
+        redirected: false, headers: {}, bodyBase64: '', bodyBytes: 0, truncated: false,
+      }),
+    } });
+    const restore = vi.spyOn(session as any, 'restoreNavigatedOrigin');
+    const response = await session.requestHttp({
+      url: 'https://public.example/resource', method: 'GET',
+      followRedirects: true, maxResponseBytes: 1024, maxDurationMs: 8000,
+    });
+    expect(response.url).toBe('https://other.example/resource');
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('preserves literal dollar tokens in request bodies and enforces UTF-8 byte caps', async () => {
+    const session = await activeSession({ summary: { url: 'https://public.example/page' }, evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      '(async () => {\n  const request = ': okString({
+        status: 204, statusText: 'No Content', url: 'https://public.example/api',
+        redirected: false, headers: {}, bodyBase64: '', bodyBytes: 0, truncated: false,
+      }),
+    } });
+    const content = "literal $& $$ $' end";
+    const request = {
+      url: 'https://public.example/api', method: 'POST', body: content,
+      followRedirects: true, maxResponseBytes: 256, maxDurationMs: 10000,
+    };
+    await session.requestHttp(request);
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const script = runtime.evaluations.find((entry) => entry.script.startsWith('(async () => {\n  const request = '))?.script;
+    expect(script).toContain(JSON.stringify(content));
+    expect(script).not.toContain('__REQUEST_DATA__');
+    await expect(session.requestHttp({ ...request, body: 'é'.repeat(600_000) }))
+      .rejects.toThrow('Request body exceeds 1 MiB');
+  });
+
+  it('rejects search navigations marked as network errors by Servo', async () => {
+    const session = await activeSession();
+    vi.spyOn(session as any, 'summary').mockResolvedValue({
+      url: 'https://public.example/search', title: '', text: '',
+      loadError: 'The page could not be loaded: DNS failed',
+    });
+    await expect(session.navigateAndReadHtml('https://public.example/search'))
+      .rejects.toThrow('DNS failed');
+  });
+
+  it('navigates and extracts DOM markup through a Servo session for search', async () => {
+    const html = '<html><body><h1>Search result</h1></body></html>';
+    const session = await activeSession({ evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))": okString(JSON.stringify(html)),
+    } });
+    const result = await session.navigateAndReadHtml('https://public.example/search?q=hello');
+    expect(result.html).toBe(html);
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    expect(runtime.calls).toContain('loadPage:https://public.example/search?q=hello');
+    expect(runtime.evaluations.some((entry) => entry.script.includes('document.documentElement?.outerHTML'))).toBe(true);
+  });
+
+  it('extracts search HTML after origin state was restored', async () => {
+    const html = '<html><body>restored</body></html>';
+    const session = await activeSession({ evaluations: {
+      [RESUME_MARKER]: okString(validResumeState),
+      "JSON.stringify((document.documentElement?.outerHTML ?? '').slice(0, 512000))": okString(JSON.stringify(html)),
+    } });
+    const events: string[] = [];
+    vi.spyOn(session as any, 'restoreNavigatedOrigin').mockImplementation(async () => { events.push('origin-restored'); });
+    const runtime = createdRuntimes.at(-1) as FakeServoRuntime;
+    const evaluate = runtime.evaluate.bind(runtime);
+    vi.spyOn(runtime, 'evaluate').mockImplementation(async (source: string, options?: { maxDurationMs?: number }) => {
+      if (source.includes('document.documentElement?.outerHTML')) events.push('html-read');
+      return evaluate(source, options);
+    });
+    const result = await session.navigateAndReadHtml('https://search.example/results');
+    expect(result.html).toBe(html);
+    expect(events).toEqual(['origin-restored', 'html-read']);
   });
 
   it('evaluates scripts and parses WebDriver-style results', async () => {

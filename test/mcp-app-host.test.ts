@@ -370,6 +370,33 @@ describe('MCP Apps browser widget host', () => {
     await page.close();
   });
 
+  live('reuses implicitly created HTTP sessions while preserving explicit falsy IDs', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+    const existing = '00000000-0000-4000-8000-000000000001';
+    const fresh = '00000000-0000-4000-8000-000000000002';
+    await page.evaluate(({ existing, fresh }) => {
+      const actions = [
+        { url: 'https://example.org/a', method: 'GET' },
+        { sessionID: null, url: 'https://example.org/b', method: 'GET' },
+      ];
+      const responses = actions.map((request, actionIndex) => ({
+        actionIndex, sessionID: actionIndex === 0 ? existing : fresh, ok: true,
+        response: { request, response: { status: 200, bodyBytes: 2 }, body: 'ok' },
+      }));
+      (window as any).__deliver({ actions }, { structuredContent: { kind: 'http', responses } });
+    }, { existing, fresh });
+    await frame.waitForFunction(() => document.querySelector('#send-request')?.textContent === 'Send 2 requests');
+    expect(await frame.evaluate(() => [...document.querySelectorAll('#http-responses section p')]
+      .map((p) => p.textContent).filter((text) => text?.startsWith('Servo session:'))))
+      .toEqual(['Servo session: ' + existing, 'Servo session: ' + fresh]);
+    await frame.click('#send-request');
+    await page.waitForFunction(() => (window as any).__calls.length > 0);
+    const actions = await page.evaluate(() => (window as any).__calls[0].arguments.actions);
+    expect(actions[0].sessionID).toBe(existing);
+    expect(actions[1].sessionID).toBeNull();
+    await page.close();
+  });
+
   live('labels and preserves all actions when resending a populated batch', async () => {
     const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
     await page.evaluate(() => {
@@ -507,14 +534,39 @@ describe('MCP Apps browser widget host', () => {
     await page.evaluate(() => { (window as unknown as { __missingToolMethod: boolean }).__missingToolMethod = true; });
     await frame.evaluate(() => {
       (window as unknown as { openai: unknown }).openai = {
-        async callTool(name: string, args: { query: string }) {
-          return { structuredContent: { results: [{ title: name + ': ' + args.query, url: 'https://example.org' }] } };
+        async callTool(name: string, args: { actions: Array<{ query: string }> }) {
+          return { structuredContent: { responses: [{
+            actionIndex: 0, sessionID: 'mock-browser', ok: true,
+            response: { results: [{ title: name + ': ' + args.actions[0].query, url: 'https://example.org' }] },
+          }] } };
         },
       };
     });
     await frame.type('#query', '  servo  ');
     await frame.click('#search');
     await frame.waitForFunction(() => document.querySelector('#results a')?.textContent === 'servo_web_search: servo');
+    await page.close();
+  });
+
+  live('renders ordered batched Servo search results and reads the first input action', async () => {
+    const { page, frame } = await openWidget("default-src 'none'; script-src 'unsafe-inline'", 'search');
+    await page.evaluate(() => {
+      (window as any).__deliver({ actions: [
+        { query: 'servo wasm', provider: 'bing', sessionID: null },
+        { query: 'mcp', provider: 'brave', sessionID: false },
+      ] }, { structuredContent: { responses: [
+        { actionIndex: 0, sessionID: 'first', ok: true, response: {
+          results: [{ title: 'Servo', url: 'https://example.com/servo', snippet: 'Engine' }],
+        } },
+        { actionIndex: 1, sessionID: 'second', ok: true, response: {
+          results: [{ title: 'MCP', url: 'https://example.com/mcp', snippet: 'Protocol' }],
+        } },
+      ] } });
+    });
+    await frame.waitForFunction(() => document.querySelectorAll('#results a').length === 2);
+    expect(await frame.evaluate(() => [...document.querySelectorAll('#results a')].map((link) => link.textContent)))
+      .toEqual(['Servo', 'MCP']);
+    expect(await frame.evaluate(() => document.querySelector<HTMLInputElement>('#query')!.value)).toBe('servo wasm');
     await page.close();
   });
 
@@ -527,7 +579,7 @@ describe('MCP Apps browser widget host', () => {
       // Advance only this transport deadline. Keep the real message bridge and event loop.
       clock.setTimeout = (callback, delay, ...args) => timer(callback, delay === 30_000 ? 1 : delay, ...args);
       (window as unknown as { openai: unknown }).openai = {
-        async callTool() { return { structuredContent: { results: [] } }; },
+        async callTool() { return { structuredContent: { responses: [{ actionIndex: 0, sessionID: 'mock-browser', ok: true, response: { results: [] } }] } }; },
       };
     });
     await frame.type('#query', 'servo');
