@@ -260,3 +260,13 @@ The deployed Worker binds `MESH` to the default Cloudflare Mesh virtual network 
 ### Browser implementation boundary
 
 MCP's `requestHttp` tool delegates validation and page execution to `ServoWorkerRuntime.requestHttp()` in Servo-WASM. MCP retains only tool-level URL admission, session selection, result formatting, and Durable Object orchestration. Browser-origin validation, page-script execution and transport implementation are owned by the Servo-WASM adapter. The new method requires an adapter artifact containing Servo-WASM PR #10; the default artifact-fetch script still selects a successful main-branch build.
+
+## Coordinated Servo-WASM PR integration
+
+The local `npm run engine:fetch` command selects a successful, verified
+Servo-WASM Worker artifact from `main` by default. For cross-repository PR
+verification, set `SERVO_WASM_SOURCE_BRANCH` to the Servo-WASM PR branch and
+optionally `SERVO_WASM_SOURCE_SHA` to its exact 40-character commit. The
+installer verifies the release manifest's commit and SHA-256 hashes. PR
+artifacts are published as `servo-worker-<commit-sha>` after the Worker WASM
+checks pass. Production deployment remains main-only until merge.

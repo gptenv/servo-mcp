@@ -16,6 +16,17 @@ const API = `https://api.github.com/repos/${OWNER}/${REPOSITORY}`;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(process.env.SERVO_WASM_STAGE_DIR ?? join(ROOT, 'src/vendor/servo-worker'));
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+// Default production installs remain pinned to main. For coordinated PR testing,
+// select the matching Servo-WASM branch and optionally its exact 40-char commit.
+const SOURCE_BRANCH = process.env.SERVO_WASM_SOURCE_BRANCH?.trim() || 'main';
+const SOURCE_SHA = process.env.SERVO_WASM_SOURCE_SHA?.trim().toLowerCase() || null;
+if (SOURCE_SHA && !/^[a-f0-9]{40}$/.test(SOURCE_SHA)) {
+  throw new Error('SERVO_WASM_SOURCE_SHA must be a full 40-character hexadecimal commit SHA.');
+}
+if (!/^[A-Za-z0-9._/-]+$/.test(SOURCE_BRANCH) || SOURCE_BRANCH.includes('..') ||
+    SOURCE_BRANCH.startsWith('/') || SOURCE_BRANCH.endsWith('/')) {
+  throw new Error('Invalid SERVO_WASM_SOURCE_BRANCH.');
+}
 
 function requireToken() {
   const token = process.env.SERVO_WASM_GITHUB_TOKEN?.trim();
@@ -81,24 +92,26 @@ async function writeLimitedResponse(response, path) {
 
 async function main() {
   const token = requireToken();
-  const runUrl = `${API}/actions/workflows/${WORKFLOW}/runs?branch=main&status=completed&per_page=20`;
+  const runUrl = `${API}/actions/workflows/${WORKFLOW}/runs?branch=${encodeURIComponent(SOURCE_BRANCH)}&status=completed&per_page=100`;
   const { workflow_runs: runs = [] } = await apiGet(runUrl, token);
-  const successfulMainRuns = runs.filter((run) =>
-    run.head_branch === 'main' && run.status === 'completed' && run.conclusion === 'success' && /^[a-f0-9]{40}$/i.test(run.head_sha),
+  const successfulRuns = runs.filter((run) =>
+    run.head_branch === SOURCE_BRANCH && run.status === 'completed' && run.conclusion === 'success' &&
+    /^[a-f0-9]{40}$/i.test(run.head_sha) &&
+    (!SOURCE_SHA || run.head_sha.toLowerCase() === SOURCE_SHA),
   );
-  if (successfulMainRuns.length === 0) throw new Error(`No successful ${WORKFLOW} workflow runs were found on ${OWNER}/${REPOSITORY}:main.`);
+  if (successfulRuns.length === 0) throw new Error(`No successful ${WORKFLOW} workflow runs found for ${OWNER}/${REPOSITORY}:${SOURCE_BRANCH}${SOURCE_SHA ? '@' + SOURCE_SHA : ''}.`);
 
   let selected;
-  for (const run of successfulMainRuns) {
+  for (const run of successfulRuns) {
     const { artifacts = [] } = await apiGet(`${API}/actions/runs/${run.id}/artifacts?per_page=100`, token);
-    const artifact = artifacts.find((item) => item.name === 'servo-worker-main')
-      ?? artifacts.find((item) => item.name === `servo-worker-${run.head_sha}`);
+    const requiredArtifact = SOURCE_BRANCH === 'main' ? 'servo-worker-main' : `servo-worker-${run.head_sha}`;
+    const artifact = artifacts.find((item) => item.name === requiredArtifact);
     if (artifact && !artifact.expired) {
       selected = { run, artifact };
       break;
     }
   }
-  if (!selected) throw new Error('No unexpired deployable servo-worker-main artifact was found in the latest successful main runs.');
+  if (!selected) throw new Error(`No unexpired Servo-WASM artifact found for ${SOURCE_BRANCH}${SOURCE_SHA ? '@' + SOURCE_SHA : ''}.`);
 
   const archiveResponse = await fetch(`${API}/actions/artifacts/${selected.artifact.id}/zip`, {
     headers: {
