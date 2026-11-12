@@ -188,8 +188,8 @@ describe('runtime configuration wiring', () => {
     expect(config.url).toBe('about:blank');
     expect(config.maxResponseBytes).toBe(8 * 1024 * 1024);
     expect(config.maxSubrequests).toBe(50);
-    expect(typeof config.fetchImpl).toBe('function');
-    expect(typeof config.webSocketFactory).toBe('function');
+    expect(typeof config.onNetworkResult).toBe('function');
+    expect(config.readiness).toEqual({});
     // console.error receives a single already-formatted string argument.
     const log = config.log as (message: string) => void;
     log('short message');
@@ -204,59 +204,26 @@ describe('runtime configuration wiring', () => {
     expect(String(longCall![0])).toBe(`[servo:logged-session] ${'x'.repeat(2048)}`);
   });
 
-  it('routes host fetches through Mesh while preserving Request data and manual redirects', async () => {
+  it('records network failures reported by the Cloudflare Servo factory', async () => {
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await session.initialize(initOptions());
-    const fetchImpl = runtimeConfigs[0].fetchImpl as (input: Request | string, init?: RequestInit) => Promise<Response>;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      fetchImplSpy(input, init);
-      return { status: 200 } as Response;
-    }));
-
-    const original = new Request('https://public.example/request', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'text/plain' },
-      body: 'original payload',
-      credentials: 'include',
-      redirect: 'follow',
-    });
-    expect((await fetchImpl(original)).status).toBe(200);
-    const forwarded = fetchImplSpy.mock.calls[0][0] as Request;
-    expect(forwarded).toBeInstanceOf(Request);
-    expect(forwarded.method).toBe('POST');
-    expect(forwarded.headers.get('Authorization')).toBe('Bearer test-token');
-    expect(forwarded.headers.get('Content-Type')).toBe('text/plain');
-    expect(forwarded.credentials).toBe('include');
-    expect(forwarded.redirect).toBe('manual');
-    expect(await forwarded.text()).toBe('original payload');
-    expect(fetchImplSpy.mock.calls[0][1]).toBeUndefined();
-
-    fetchImplSpy.mockClear();
-    expect((await fetchImpl('https://public.example/api', {
-      method: 'PATCH', headers: { 'X-Test': 'override' }, body: 'updated',
-    })).status).toBe(200);
-    const fromInit = fetchImplSpy.mock.calls[0][0] as Request;
-    expect(fromInit.method).toBe('PATCH');
-    expect(fromInit.headers.get('X-Test')).toBe('override');
-    expect(await fromInit.text()).toBe('updated');
-    expect(fromInit.redirect).toBe('manual');
-
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('host fetch failed'); }));
-    await expect(fetchImpl('https://public.example/failure')).rejects.toThrow('host fetch failed');
+    const onNetworkResult = runtimeConfigs[0].onNetworkResult as (url: string, status: number | null, error: unknown) => void;
+    expect(typeof onNetworkResult).toBe('function');
+    onNetworkResult('https://public.example/failure', null, new Error('host fetch failed'));
     expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/failure')).toBe('host fetch failed');
-    await expect(fetchImpl(new Request('https://public.example/request-failure'))).rejects.toThrow('host fetch failed');
-    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/request-failure')).toBe('host fetch failed');
-    await expect(fetchImpl('http://127.0.0.1/x')).rejects.toThrow(TypeError);
-    vi.unstubAllGlobals();
+    onNetworkResult('https://public.example/plain', null, 'plain rejection');
+    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/plain')).toBe('plain rejection');
+    onNetworkResult('https://public.example/http-error', 404, null);
+    expect((session as unknown as { fetchFailures: Map<string, string> }).fetchFailures.get('https://public.example/http-error')).toBe('HTTP 404');
   });
 
-  it('rejects non-public WebSocket destinations before opening a Mesh upgrade', async () => {
+  it('does not expose an MCP-owned Mesh fetch or WebSocket factory (network is owned by the Servo factory)', async () => {
     scriptRuntime({ summary: { url: 'about:blank', title: '', text: '' } });
     const session = await newSession();
     await session.initialize(initOptions());
-    const factory = runtimeConfigs[0].webSocketFactory as (url: string) => unknown;
-    expect(() => factory('ws://localhost/socket')).toThrow(TypeError);
+    expect(runtimeConfigs[0].fetchImpl).toBeUndefined();
+    expect(runtimeConfigs[0].webSocketFactory).toBeUndefined();
   });
 });
 
@@ -759,8 +726,8 @@ describe('operate lifecycle', () => {
       summary: () => ({ url: pumpCalls === 0 ? 'https://public.example/before' : url }),
       pumpFactory: async () => {
         if (pumpCalls++ === 0) {
-          const fetchPage = runtimeConfigs.at(-1)!.fetchImpl as typeof fetch;
-          await expect(fetchPage(url)).rejects.toBe(rejection);
+          const onNetworkResult = runtimeConfigs.at(-1)!.onNetworkResult as (url: string, status: number | null, error: unknown) => void;
+          onNetworkResult(url, null, rejection);
         }
         return { settled: true };
       },
