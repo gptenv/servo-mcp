@@ -45,7 +45,7 @@ const createServoWorkerRuntime = vi.fn(async (_wasm: unknown, config: Record<str
   createdRuntimes.push(runtime);
   return runtime;
 });
-vi.mock('./helpers/servo-worker-adapter.ts', () => ({ createServoWorkerRuntime }));
+vi.mock('./helpers/servo-worker-adapter.ts', () => ({ createServoWorkerRuntime, createCloudflareServoBrowser: createServoWorkerRuntime }));
 vi.mock('../src/vendor/servo-worker/servo_js_wasm.wasm', () => ({
   default: {},
 }));
