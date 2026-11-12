@@ -171,10 +171,10 @@ describe('MCP Worker routes and server registration', () => {
 
     const searchResource = harness.resources.get('servo-web-search-ui')!;
     expect(searchResource.definition.mimeType).toBe('text/html;profile=mcp-app');
-    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v4.html');
+    expect(registeredTool('servo_web_search').definition._meta.ui.resourceUri).toBe('ui://servo/search-v5.html');
     for (const [name, tool] of harness.tools) {
       if (name === 'servo_web_search') continue;
-      const expectedUri = name.startsWith('servo_http_') ? 'ui://servo/http-v3.html' : 'ui://servo/browser-v4.html';
+      const expectedUri = name.startsWith('servo_http_') ? 'ui://servo/http-v4.html' : 'ui://servo/browser-v4.html';
       expect(tool.definition._meta.ui.resourceUri).toBe(expectedUri);
       expect(tool.definition._meta['openai/outputTemplate']).toBe(expectedUri);
     }
@@ -187,13 +187,13 @@ describe('MCP Worker routes and server registration', () => {
     expect(registeredTool('servo_app_open').definition.inputSchema.parse({})).toEqual({});
     expect(registeredTool('servo_navigate').definition._meta?.['openai/ui']).toBeUndefined();
     expect(registeredTool('servo_inspect').definition._meta?.['openai/ui']).toBeUndefined();
-    const searchWidget = await searchResource.handler(new URL('ui://servo/search-v4.html'));
+    const searchWidget = await searchResource.handler(new URL('ui://servo/search-v5.html'));
     expect(searchWidget.contents[0].text).toContain('Servo web search');
     expect(searchWidget.contents[0].text).toContain('<option value="brave">Brave</option>');
     expect(searchWidget.contents[0].text).toContain('ui/initialize');
     expect(searchWidget.contents[0].text).toContain('ui/notifications/initialized');
 
-    const httpResource = await harness.resources.get('servo-http-ui')!.handler(new URL('ui://servo/http-v3.html'));
+    const httpResource = await harness.resources.get('servo-http-ui')!.handler(new URL('ui://servo/http-v4.html'));
     expect(httpResource.contents[0].text).toContain('<html lang="en" data-view="http">');
     const browserResource = harness.resources.get('servo-browser-ui')!;
     const widget = await browserResource.handler(new URL('ui://servo/browser-v4.html'));
