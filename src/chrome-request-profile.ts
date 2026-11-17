@@ -26,9 +26,16 @@ const SERVO_DEFAULT_ACCEPTS = new Set([
   'text/plain,*/*;q=0.5',
   '*/*',
 ]);
+const SERVO_DEFAULT_ACCEPT_LANGUAGES = new Set(['en-US']);
 
-function chromeAccept(destination: string | null): string {
-  switch (destination?.toLowerCase()) {
+function normalizedDestination(destination: unknown, preflight: boolean): string {
+  if (preflight) return 'empty';
+  if (typeof destination !== 'string') return '';
+  return destination === 'None' ? 'empty' : destination.toLowerCase();
+}
+
+function chromeAccept(destination: string): string {
+  switch (destination) {
     case 'document':
     case 'iframe':
     case 'frame':
@@ -43,9 +50,16 @@ function chromeAccept(destination: string | null): string {
 }
 
 /** Add defaults while retaining caller-supplied values and Servo's fetch metadata. */
-export function applyChromeRequestDefaults(request: Request): Request {
+export function applyChromeRequestDefaults(
+  request: Request,
+  requestContext: { destination?: unknown; preflight?: boolean } = {},
+): Request {
   const url = new URL(request.url);
   const headers = new Headers(request.headers);
+  const destination = normalizedDestination(
+    requestContext.destination ?? headers.get('sec-fetch-dest'),
+    requestContext.preflight === true,
+  );
   const userAgent = headers.get('user-agent');
   if (userAgent === null || SERVO_DEFAULT_USER_AGENT.test(userAgent)) {
     headers.set('user-agent', CHROME_REQUEST_PROFILE.userAgent);
@@ -56,15 +70,26 @@ export function applyChromeRequestDefaults(request: Request): Request {
     if (!headers.has('sec-ch-ua-mobile')) headers.set('sec-ch-ua-mobile', CHROME_REQUEST_PROFILE.secChUaMobile);
     if (!headers.has('sec-ch-ua-platform')) headers.set('sec-ch-ua-platform', CHROME_REQUEST_PROFILE.secChUaPlatform);
   }
-  if (!headers.has('accept-language')) headers.set('accept-language', CHROME_REQUEST_PROFILE.acceptLanguage);
+  const acceptLanguage = headers.get('accept-language');
+  if (acceptLanguage === null || SERVO_DEFAULT_ACCEPT_LANGUAGES.has(acceptLanguage)) {
+    headers.set('accept-language', CHROME_REQUEST_PROFILE.acceptLanguage);
+  }
   if (!headers.has('accept-encoding')) headers.set('accept-encoding', CHROME_REQUEST_PROFILE.acceptEncoding);
 
   const accept = headers.get('accept');
   if (accept === null || SERVO_DEFAULT_ACCEPTS.has(accept)) {
-    headers.set('accept', chromeAccept(headers.get('sec-fetch-dest')));
+    headers.set('accept', requestContext.preflight ? CHROME_REQUEST_PROFILE.acceptOther : chromeAccept(destination));
   }
-  if (['document', 'iframe', 'frame'].includes(headers.get('sec-fetch-dest')?.toLowerCase() ?? '') &&
-      headers.get('sec-fetch-mode') === 'navigate' && !headers.has('upgrade-insecure-requests')) {
+  if (url.protocol === 'https:' && !headers.has('sec-fetch-dest')) {
+    headers.set('sec-fetch-dest', destination);
+  }
+  if (url.protocol === 'https:' && !headers.has('sec-fetch-mode')) {
+    headers.set('sec-fetch-mode', requestContext.preflight ? 'cors' :
+      ['document', 'iframe', 'frame'].includes(destination) ? 'navigate' :
+        destination === 'empty' ? 'cors' : 'no-cors');
+  }
+  if (['document', 'iframe', 'frame'].includes(destination) &&
+      !requestContext.preflight && !headers.has('upgrade-insecure-requests')) {
     headers.set('upgrade-insecure-requests', '1');
   }
 

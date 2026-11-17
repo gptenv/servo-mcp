@@ -57,4 +57,15 @@ describe('Chrome request defaults', () => {
     expect(navigation.headers.get('upgrade-insecure-requests')).toBe('1');
     expect(image.headers.get('accept')).toBe(CHROME_REQUEST_PROFILE.acceptImage);
   });
+
+  it('uses the request destination forwarded by the Servo host adapter', () => {
+    const navigation = applyChromeRequestDefaults(new Request('https://example.com/', {
+      headers: { Accept: '*/*', 'Accept-Language': 'en-US' },
+    }), { destination: 'Document' });
+
+    expect(navigation.headers.get('accept')).toBe(CHROME_REQUEST_PROFILE.acceptDocument);
+    expect(navigation.headers.get('accept-language')).toBe(CHROME_REQUEST_PROFILE.acceptLanguage);
+    expect(navigation.headers.get('sec-fetch-dest')).toBe('document');
+    expect(navigation.headers.get('sec-fetch-mode')).toBe('navigate');
+  });
 });

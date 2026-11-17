@@ -117,12 +117,16 @@ function createCloudflareTransport(
     }
     return url;
   };
-  const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+    requestContext?: { destination?: unknown; preflight?: boolean },
+  ) => {
     const url = input instanceof Request ? input.url : String(input);
     ensureAllowed(url);
     try {
       const request = new Request(input, { ...init, redirect: 'manual' });
-      const response = await mesh.fetch(applyChromeRequestDefaults(request));
+      const response = await mesh.fetch(applyChromeRequestDefaults(request, requestContext));
       onNetworkResult?.(url, response.status, null);
       return response;
     } catch (error) {
