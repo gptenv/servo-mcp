@@ -218,7 +218,12 @@ Add these repository secrets under **Settings → Secrets and variables →
 Actions** to enable production deployment:
 
 - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token scoped to the target account
-  with Workers Scripts:Edit and Account Settings:Read.
+  with Workers Scripts:Edit, Account Settings:Read, and Connectivity Directory:Bind
+  (required for the MESH / `cf1:network` VPC Network binding in `wrangler.jsonc`).
+  Connectivity Directory:Admin is also sufficient. Without the Connectivity Directory
+  permission, deployment fails with Cloudflare API error 10196
+  (`Workers VPC binding configuration failed because your credentials are not authorized
+  for the requested VPC resource`). Do not remove the binding to work around this.
 - `CLOUDFLARE_ACCOUNT_ID`: the target Cloudflare account ID.
 
 The Cloudflare token is separate from the local GitHub PAT. The GitHub PAT is
