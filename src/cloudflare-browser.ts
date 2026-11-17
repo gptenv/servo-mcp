@@ -39,6 +39,7 @@ export async function createCloudflareServoBrowser(
         headers: input.headers || {},
         body: input.body,
         followRedirects: input.followRedirects !== false,
+        maxResponseBytes: input.maxResponseBytes || 512 * 1024,
         maxDurationMs: input.maxDurationMs || 10000,
       });
       const script = `(async () => {
@@ -54,28 +55,45 @@ export async function createCloudflareServoBrowser(
             signal: controller.signal,
           });
           const headers = Object.fromEntries(response.headers.entries());
-          let body = null;
+          let bodyBase64 = '';
+          let bodyBytes = 0;
+          let truncated = false;
           if (request.method !== 'HEAD' && response.body) {
             const reader = response.body.getReader();
             const chunks = [];
-            let size = 0;
-            const max = 2 * 1024 * 1024;
+            const max = request.maxResponseBytes;
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              size += value.byteLength;
-              if (size > max) { chunks.push(value.slice(0, max - (size - value.byteLength))); break; }
+              if (bodyBytes + value.byteLength > max) {
+                const remaining = max - bodyBytes;
+                if (remaining > 0) chunks.push(value.slice(0, remaining));
+                bodyBytes += Math.max(remaining, 0);
+                truncated = true;
+                await reader.cancel();
+                break;
+              }
               chunks.push(value);
+              bodyBytes += value.byteLength;
             }
-            const blob = new Blob(chunks);
-            body = await blob.text();
+            const bytes = new Uint8Array(bodyBytes);
+            let offset = 0;
+            for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+            // Encode in bounded chunks to avoid argument/string size limits.
+            // Keep every non-final chunk on a 3-byte boundary so the base64
+            // padding from intermediate chunks cannot corrupt the final value.
+            for (let start = 0; start < bytes.length; start += 0x7ffe) {
+              bodyBase64 += btoa(String.fromCharCode(...bytes.subarray(start, start + 0x7ffe)));
+            }
           }
           return JSON.stringify({
             status: response.status,
             statusText: response.statusText,
             headers,
             url: response.url,
-            body,
+            bodyBase64,
+            bodyBytes,
+            truncated,
             redirected: response.redirected,
           });
         } finally {
