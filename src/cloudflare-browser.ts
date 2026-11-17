@@ -1,4 +1,5 @@
 import { createServoWorkerRuntime } from './vendor/servo-worker/worker-adapter.mjs';
+import { applyChromeRequestDefaults } from './chrome-request-profile';
 
 /**
  * Cloudflare-specific Servo browser factory.
@@ -120,7 +121,8 @@ function createCloudflareTransport(
     const url = input instanceof Request ? input.url : String(input);
     ensureAllowed(url);
     try {
-      const response = await mesh.fetch(new Request(input, { ...init, redirect: 'manual' }));
+      const request = new Request(input, { ...init, redirect: 'manual' });
+      const response = await mesh.fetch(applyChromeRequestDefaults(request));
       onNetworkResult?.(url, response.status, null);
       return response;
     } catch (error) {

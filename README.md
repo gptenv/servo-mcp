@@ -260,3 +260,9 @@ The deployed Worker binds `MESH` to the default Cloudflare Mesh virtual network 
 ### Browser implementation boundary
 
 MCP's `requestHttp` tool delegates validation and page execution to `ServoWorkerRuntime.requestHttp()` in Servo-WASM. MCP retains only tool-level URL admission, session selection, result formatting, and Durable Object orchestration. Browser-origin validation, page-script execution and transport implementation are owned by the Servo-WASM adapter. The new method requires an adapter artifact containing Servo-WASM PR #10; the default artifact-fetch script still selects a successful main-branch build.
+
+### Chrome-compatible request defaults
+
+The MESH transport applies a pinned Chrome 157 Windows desktop header profile. Its user-agent and low-entropy User-Agent Client Hints were generated from `header-generator@2.1.90`; the profile is static so identical Worker builds do not randomize headers at runtime. Accept values are selected by request destination. Caller-supplied non-default values are preserved, while known Servo defaults are replaced with the Chrome profile. Refresh the profile when the generally available Chrome Stable major version changes. As of Nov 17, 2026, Chrome 157 is the general Stable version; Google’s Chrome Releases blog reported 158 only as an early Stable rollout to a small percentage of users.
+
+This aligns the HTTP-level defaults available to the Worker. It does not reproduce Chrome’s TLS fingerprint, exact HTTP/2 header ordering, per-origin high-entropy client hints, or an individual user's locale and codec configuration. Chrome request headers also vary by destination and navigation state.
