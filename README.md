@@ -178,11 +178,9 @@ npm test
 npm run dev
 ```
 
-`npm run engine:fetch` downloads the latest successful, unexpired Servo artifact
-through GitHub's official Actions API, verifies its commit and SHA-256 manifest,
-and stages the adapter and WASM under the ignored
-`src/vendor/servo-worker/` directory. `npm run deploy` and `npm run dev` do
-this automatically. The generated package is not committed.
+Run `git submodule update --init` and stage the browser engine following the
+[servo-wasm Worker instructions](servo-wasm/ports/servo-js-wasm/cloudflare-worker/README.md)
+before starting both Workers with `npm run dev`.
 
 The local health endpoint is `http://127.0.0.1:8788/health`; the MCP endpoint is
 `http://127.0.0.1:8788/mcp`. Connect ChatGPT Developer Mode or MCP Inspector to
@@ -196,78 +194,28 @@ most recent screenshots for up to 24 hours. Closing the browser session revokes 
 Larger captures are stored as 512 KiB chunks. The browser UI
 resource allows that Worker origin in `ui.csp.resourceDomains` and
 `openai/widgetCSP.resource_domains`, and the widget falls back from a `data:`
-URL to the hosted PNG when a host CSP blocks one of them. Browser-session continuity lives in per-session Durable
-Objects, separate from the stateless MCP transport. The `ServoBrowserSession`
-SQLite class is declared in `wrangler.jsonc`; apply its migration when
-deploying.
+URL to the hosted PNG when a host CSP blocks one of them.
 
-Run `npm run typecheck` and `npm test` for the app checks. `npm run
-deploy:dry-run` fetches the latest verified artifact and asks Wrangler to
-calculate the bundle without deploying. `npm run deploy:staged` deploys an
-already staged package and is used by CI after its build job succeeds.
+## Deployment
 
-## Continuous deployment
+`servo-mcp` serves MCP, App widgets and download URLs. Its
+`BROWSER_SESSIONS` binding targets the SQLite-backed Durable Objects on the
+private `servo-wasm` Worker. That Worker owns browser session state,
+navigation, in-page HTTP, search, and recording. Deploy the browser Worker
+before deploying this Worker to a new environment. The production migration is
+defined in the servo-wasm configuration and transfers the existing session
+namespace with its contents.
 
-Pull requests run the typecheck and app tests. After those pass on `main`, CI
-checks out the public `servo-wasm` `main` source in its temporary runner,
-builds and tests the Worker WASM, validates the MCP bundle, and then deploys the
-successful build to Cloudflare. CI does not need or receive
-`SERVO_WASM_GITHUB_TOKEN`.
-
-Add these repository secrets under **Settings → Secrets and variables →
-Actions** to enable production deployment:
-
-- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token scoped to the target account
-  with Workers Scripts:Edit, Account Settings:Read, and Connectivity Directory:Bind
-  (required for the MESH / `cf1:network` VPC Network binding in `wrangler.jsonc`).
-  Connectivity Directory:Admin is also sufficient. Without the Connectivity Directory
-  permission, deployment fails with Cloudflare API error 10196
-  (`Workers VPC binding configuration failed because your credentials are not authorized
-  for the requested VPC resource`). Do not remove the binding to work around this.
-- `CLOUDFLARE_ACCOUNT_ID`: the target Cloudflare account ID.
-
-The Cloudflare token is separate from the local GitHub PAT. The GitHub PAT is
-only for local artifact retrieval; the CI deployment uses Cloudflare credentials
-stored as GitHub Actions secrets.
-
-## Test deployment
-
-Deployed on 2026-09-30 to the authenticated Cloudflare account. The live Worker
-uses Durable Object-backed browser sessions. The screen-recording tools above
-are source changes and are not live until a later deployment.
+CI runs the MCP typecheck and tests, then deploys the MCP Worker on `main`
+using the repository's `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`
+secrets. The token needs Workers Scripts:Edit and Account Settings:Read on
+the target account. The browser Worker's deployment credentials additionally
+need Connectivity Directory:Bind for the `MESH` binding.
 
 - MCP endpoint: <https://servo-mcp.defcronyke.workers.dev/mcp>
 - Health: <https://servo-mcp.defcronyke.workers.dev/health>
-- Deployed Worker version: `50cd14f7-3bc4-4903-8dca-c0eb0209aa38` (servo-wasm `c032c2791`, ABI 11)
-
-The `/health` endpoint and MCP `tools/list` response were verified against the
-live Worker. The endpoint currently has no authentication and is public for
-testing. Before broader publication, decide the access
-policy; add OAuth and consent before private or user-scoped use. Measure CPU
-and total isolate memory on the intended Workers plan and review Cloudflare and
-ChatGPT submission requirements before publication. The deployed bundle was
-49,987.34 KiB (15,274.21 KiB gzip) in Wrangler's dry run, below the 64 MiB Worker limit.
-
-The MCP handler validates localhost and `workers.dev` Host/Origin defaults;
-custom domains should also be protected by Cloudflare routing and deployment
-policy.
 
 ## License
 
 MIT for Servo MCP code in this repository. The Servo WASM submodule and all
 third-party packages remain under their own license terms.
-
-### Cloudflare Mesh egress
-
-The deployed Worker binds `MESH` to the default Cloudflare Mesh virtual network via `cf1:network`. The Servo network adapter uses `env.MESH.fetch()` for all HTTP(S) navigation, document, asset, and in-page network requests. It does not fall back to the Worker-global fetch if Mesh is unavailable. Servo's WebSocket factory requests a WebSocket upgrade through the same Mesh binding, bridges messages and closes the session if the upgrade fails; ordinary WebSockets must never bypass the routing policy. Confirm WebSocket upgrade support in your deployed account and inspect Cloudflare Gateway traffic logs. HTTP previews remain offline. This is Gateway/Mesh routing, not a WARP client process running in the Worker.
-
-
-### Browser implementation boundary
-
-MCP's `requestHttp` tool delegates validation and page execution to `ServoWorkerRuntime.requestHttp()` in Servo-WASM. MCP retains only tool-level URL admission, session selection, result formatting, and Durable Object orchestration. Browser-origin validation, page-script execution and transport implementation are owned by the Servo-WASM adapter. The new method requires an adapter artifact containing Servo-WASM PR #10; the default artifact-fetch script still selects a successful main-branch build.
-
-### Chrome-compatible request defaults
-
-The MESH transport applies a pinned Chrome 157 Windows desktop header profile. Its user-agent and low-entropy User-Agent Client Hints were generated from `header-generator@2.1.90`; the profile is static so identical Worker builds do not randomize headers at runtime. Accept values are selected by request destination. Caller-supplied non-default values are preserved, while known Servo defaults are replaced with the Chrome profile. Refresh the profile when the generally available Chrome Stable major version changes. As of Nov 17, 2026, Chrome 157 is the general Stable version; Google’s Chrome Releases blog reported 158 only as an early Stable rollout to a small percentage of users.
-
-This aligns the HTTP-level defaults available to the Worker. It does not reproduce Chrome’s TLS fingerprint, exact HTTP/2 header ordering, per-origin high-entropy client hints, or an individual user's locale and codec configuration. Chrome request headers also vary by destination and navigation state.

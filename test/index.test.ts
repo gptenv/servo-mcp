@@ -31,8 +31,6 @@ vi.mock('@modelcontextprotocol/server', () => ({
   },
 }));
 
-vi.mock('../src/browser-session', () => ({ ServoBrowserSession: class {} }));
-
 import worker, { mcpResult } from '../src/index';
 
 type Session = Record<string, ReturnType<typeof vi.fn>>;
@@ -52,9 +50,10 @@ function makeSession(): Session {
     navigateHtml: vi.fn(async (html: string) => ({ action: 'navigate', page: { url: 'https://servo-inline.invalid/', title: 'Inline', text: html } })),
     navigate: vi.fn(async (url: string) => ({ action: 'navigate', page: { url, title: 'Example', text: 'visible page text' } })),
     inspect: vi.fn(async () => ({ url: 'https://example.com/', title: 'Example', text: 'body' })),
-    navigateAndReadHtml: vi.fn(async (url: string) => ({
-      html: '<rss><item><title>Result</title><link>https://example.org/article</link><description>Snippet</description></item></rss>',
-      page: { url, title: 'Search', text: 'Result' },
+    search: vi.fn(async (_query: string, _limit: number, provider: string) => ({
+      results: [{ title: 'Result', url: 'https://example.org/article', snippet: 'Snippet' }],
+      providers: [provider],
+      failedProviders: [],
     })),
     requestHttp: vi.fn(async (action: { url: string; method: string; body?: string }) => {
       if (action.body && ['GET', 'HEAD'].includes(action.method)) {
@@ -65,7 +64,7 @@ function makeSession(): Session {
       return {
         status: 201, statusText: 'Created', url: action.url, redirected: false,
         headers: { 'content-type': 'text/html; charset=utf-8', 'x-origin': 'servo-session' },
-        bodyBase64: Buffer.from(body).toString('base64'),
+        body: new TextEncoder().encode(body),
         bodyBytes: Buffer.byteLength(body), truncated: false,
       };
     }),
@@ -375,7 +374,7 @@ describe('focused browser tools', () => {
       ['servo_recording_start', {}, 'startScreenRecording'], ['servo_recording_stop', { recordingId }, 'stopScreenRecording'],
       ['servo_recording_status', { recordingId }, 'getScreenRecordingStatus'],
       ['servo_recording_download', { recordingId }, 'getScreenRecordingDownloadInfo'],
-      ['servo_web_search', { query: 'article', provider: 'bing' }, 'navigateAndReadHtml'],
+      ['servo_web_search', { query: 'article', provider: 'bing' }, 'search'],
     ];
     for (const [tool, args, method] of cases) {
       defaultSession.initialize.mockClear();
@@ -642,7 +641,7 @@ describe('focused browser tools', () => {
     expect(unsupported.responses[0]).toMatchObject({ ok: false, error: expect.stringMatching(/forbidden/) });
   });
 
-  it('performs MCP web searches through Servo navigation rather than Worker fetch', async () => {
+  it('delegates web searches to the browser Worker', async () => {
     const fetchMock = vi.fn(async () => { throw new Error('Do not use Worker fetch for web search'); });
     vi.stubGlobal('fetch', fetchMock);
     try {
@@ -652,7 +651,7 @@ describe('focused browser tools', () => {
       expect(result.responses[0]).toMatchObject({ actionIndex: 0, ok: true, sessionID: sessionId });
       expect(result.responses[0].response.providers).toEqual(['bing']);
       expect(result.responses[0].response.results[0]).toMatchObject({ title: 'Result', url: 'https://example.org/article' });
-      expect(defaultSession.navigateAndReadHtml).toHaveBeenCalledWith(expect.stringContaining('bing.com/search'));
+      expect(defaultSession.search).toHaveBeenCalledWith('article', 8, 'bing');
       expect(fetchMock).not.toHaveBeenCalled();
     } finally { vi.unstubAllGlobals(); }
   });
@@ -661,7 +660,7 @@ describe('focused browser tools', () => {
     for (const [name, extra, method] of [
       ['servo_http_request', { url: 'https://example.com/api', method: 'GET' }, 'requestHttp'],
       ['servo_http_post', { url: 'https://example.com/api', body: 'ok' }, 'requestHttp'],
-      ['servo_web_search', { query: 'servo', provider: 'bing' }, 'navigateAndReadHtml'],
+      ['servo_web_search', { query: 'servo', provider: 'bing' }, 'search'],
     ] as const) {
       defaultSession.initialize.mockClear();
       defaultSession[method].mockClear();

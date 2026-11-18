@@ -6,14 +6,11 @@
   "license": "MIT",
   "description": "A ChatGPT MCP App with a Servo WASM browser, multi-provider web search, and a global ChatGPT sidebar entrypoint.",
   "scripts": {
-    "engine:fetch": "node --env-file-if-exists=.env scripts/fetch-servo-wasm-artifact.mjs",
-    "engine:build": "npm run engine:fetch",
-    "dev": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js dev --ip 127.0.0.1 --port 8788",
+    "dev": "node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js dev --ip 127.0.0.1 --port 8788 -c wrangler.jsonc -c servo-wasm/ports/servo-js-wasm/cloudflare-worker/wrangler.local.jsonc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "deploy": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy",
-    "deploy:dry-run": "npm run engine:fetch && node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy --dry-run",
-    "deploy:staged": "wrangler deploy"
+    "deploy": "node --env-file-if-exists=.env node_modules/wrangler/bin/wrangler.js deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
@@ -24,7 +21,6 @@
     "@cloudflare/workers-types": "^5.20260925.1",
     "@types/node": "^22.20.4",
     "@vitest/coverage-v8": "4.1.11",
-    "header-generator": "^2.1.90",
     "puppeteer-core": "^24.22.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0",

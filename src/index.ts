@@ -1,11 +1,11 @@
+import { toBase64 } from './base64';
 import { createMcpHandler } from 'agents/mcp/server';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import widgetHtml from './browser-widget.html';
 import searchWidgetHtml from './search-widget.html';
-import { searchWeb } from './web-search';
-import { ServoBrowserSession, type PageReadinessOptions } from './browser-session';
-import { assertPublicHttpUrl } from './security';
+import type { PageReadinessOptions } from '../servo-wasm/ports/servo-js-wasm/cloudflare-worker/src/browser-session';
+import { assertPublicHttpUrl } from '../servo-wasm/ports/servo-js-wasm/cloudflare-worker/src/security';
 import { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS, httpPreviewHtml, requestHttp } from './http-tools';
 
 const WIDGET_URI = 'ui://servo/browser-v4.html';
@@ -65,14 +65,6 @@ const recordingIdSchema = multiSession({ recordingId: z.string().uuid() });
 const registerFontSchema = multiSession({ fontBase64: z.string().min(1).max(MAX_FONT_BASE64_BYTES) });
 const capabilitiesSchema = multiSession({});
 const inspectSchema = multiSession({ readiness: readinessSchema.optional() });
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
 
 export type WidgetScreenshot = {
   sessionID: string;
@@ -253,10 +245,7 @@ function createServer(env: Env, publicOrigin: string) {
     inputSchema: z.object({ actions: z.array(searchActionSchema).min(1).max(20) }).strict(),
     _meta: searchUiMeta,
   }, async (input) => safely(async () => runSessions(input, async (browser, action) => {
-    const data = await searchWeb(action.query, async (url) => {
-      const page = await browser.navigateAndReadHtml(url.href);
-      return page.html;
-    }, action.limit, action.provider);
+    const data = await browser.search(action.query, action.limit, action.provider);
     return { query: action.query, provider: action.provider, ...data };
   })));
 
@@ -544,8 +533,6 @@ function createServer(env: Env, publicOrigin: string) {
 
   return server;
 }
-
-export { ServoBrowserSession };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

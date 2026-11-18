@@ -1,12 +1,6 @@
-import { z } from 'zod';
-import { assertPublicHttpUrl } from './security';
-
-export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
-export type HttpMethod = typeof HTTP_METHODS[number];
-
-export const MAX_HTTP_REQUEST_BYTES = 1 * 1024 * 1024;
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_HEADERS = 64;
+import { toBase64 } from './base64';
+import type { HttpRequest, ServoHttpResponse } from '../servo-wasm/ports/servo-js-wasm/cloudflare-worker/src/http-contract';
+export { httpRequestSchema, httpVerbRequestSchema, HTTP_METHODS } from '../servo-wasm/ports/servo-js-wasm/cloudflare-worker/src/http-contract';
 
 function decodeCodePoint(decimal: string, radix = 10): string {
   const value = parseInt(decimal, radix);
@@ -14,26 +8,6 @@ function decodeCodePoint(decimal: string, radix = 10): string {
     ? String.fromCodePoint(value)
     : '\uFFFD';
 }
-
-const headersSchema = z.record(z.string().min(1).max(256), z.string().max(8192))
-  .refine((headers) => Object.keys(headers).length <= MAX_HEADERS, `At most ${MAX_HEADERS} headers are allowed.`);
-
-export const httpRequestSchema = z.object({
-  // Session options mirror the focused browser-action tools.
-  sessionID: z.union([z.string().uuid(), z.literal(null), z.literal(false), z.literal(0), z.literal('')]).optional(),
-  width: z.number().int().min(320).max(1920).optional(),
-  height: z.number().int().min(240).max(1600).optional(),
-  url: z.string().url().max(2048),
-  method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$/).default('GET'),
-  headers: headersSchema.optional(),
-  body: z.string().max(MAX_HTTP_REQUEST_BYTES).optional(),
-  followRedirects: z.boolean().default(true),
-  maxResponseBytes: z.number().int().min(1).max(MAX_RESPONSE_BYTES).default(512 * 1024),
-  maxDurationMs: z.number().int().min(100).max(15_000).default(10_000),
-});
-
-export const httpVerbRequestSchema = httpRequestSchema.omit({ method: true });
-export type HttpRequest = z.infer<typeof httpRequestSchema>;
 
 function textFromHtml(source: string): { title: string; text: string } {
   const title = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(source)?.[1] ?? '';
@@ -60,27 +34,14 @@ function textFromHtml(source: string): { title: string; text: string } {
   };
 }
 
-/** An HTTP response produced by fetch() inside the Servo page context. */
-export type ServoHttpResponse = {
-  status: number;
-  statusText: string;
-  url: string;
-  redirected: boolean;
-  headers: Record<string, string>;
-  bodyBase64: string;
-  bodyBytes: number;
-  truncated: boolean;
-};
-
 /**
  * Format a bounded browser response for MCP. Network access is deliberately
  * absent here: ServoBrowserSession.requestHttp owns the actual request.
  */
 export function requestHttp(input: HttpRequest, response: ServoHttpResponse) {
-  const bodyBytes = Uint8Array.from(atob(response.bodyBase64), (char) => char.charCodeAt(0));
   const contentType = response.headers['content-type'] ?? '';
   const textual = /^(text\/|application\/(?:json|[^;]+\+json|xml|[^;]+\+xml|javascript|x-www-form-urlencoded))/i.test(contentType);
-  const decoded = textual ? new TextDecoder().decode(bodyBytes) : undefined;
+  const decoded = textual ? new TextDecoder().decode(response.body) : undefined;
   const extracted = decoded && /html/i.test(contentType) ? textFromHtml(decoded) : undefined;
   const content = extracted?.text ?? decoded;
   const title = extracted?.title || response.headers['x-page-title'] || new URL(input.url).hostname;
@@ -104,7 +65,7 @@ export function requestHttp(input: HttpRequest, response: ServoHttpResponse) {
       content: content.slice(0, 20_000),
     }],
     body: decoded ?? null,
-    bodyBase64: content === undefined ? response.bodyBase64 : null,
+    bodyBase64: content === undefined ? toBase64(response.body) : null,
   };
 }
 

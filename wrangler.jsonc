@@ -10,16 +10,6 @@
   "observability": {
     "enabled": true
   },
-  "rules": [
-    {
-      "type": "CompiledWasm",
-      "globs": [
-        "src/vendor/servo-worker/servo_js_wasm.wasm",
-        "src/vendor/h264-mp4-encoder.wasm"
-      ],
-      "fallthrough": true
-    }
-  ],
   "vars": {
     "APP_NAME": "Servo MCP"
   },
@@ -27,23 +17,9 @@
     "bindings": [
       {
         "name": "BROWSER_SESSIONS",
-        "class_name": "ServoBrowserSession"
+        "class_name": "ServoBrowserSession",
+        "script_name": "servo-wasm"
       }
     ]
-  },
-  "migrations": [
-    {
-      "tag": "v1-servo-browser-sessions",
-      "new_sqlite_classes": [
-        "ServoBrowserSession"
-      ]
-    }
-  ],
-  "vpc_networks": [
-    {
-      "binding": "MESH",
-      "network_id": "cf1:network",
-      "remote": true
-    }
-  ]
+  }
 }
